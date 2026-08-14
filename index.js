@@ -17,12 +17,14 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
+import { z } from 'zod'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { parseCurriculum, publicQuestions } from './lib/curriculum.js'
 import { buildPolicy } from './lib/policy.js'
 import { LedgerStore, gapId, GAP_STATUS } from './lib/ledger.js'
 import { foldTeacherState, hasOpenTurn } from './lib/fold.js'
+import { gapProjectionWith } from './lib/gap-projection.js'
 import {
   buildGap, gapKindForVerdict, isCorrect, ratingForVerdict, verdictLabel,
 } from './lib/grading.js'
@@ -251,6 +253,19 @@ export async function apply(ctx) {
     return next()
   })
 
+  // Session projection: fold teacher/gap + teacher/grade events so the Web
+  // client renders the in-session gap ledger via useProjection('teacherGaps').
+  ctx.inject(['sessionProjections'], (projectionCtx) => {
+    projectionCtx.sessionProjections.register(
+      gapProjectionWith(
+        z.object({
+          gaps: z.array(z.any()),
+          grades: z.array(z.any()),
+        }),
+      ),
+    )
+  })
+
   // Conditional Socratic policy section — empty unless teacher mode is active.
   ctx.systemPrompt.section({
     name: 'teacher:policy',
@@ -424,6 +439,16 @@ export async function apply(ctx) {
         total: course.questions.length,
       }
     },
+    presentCall: (args) => ({
+      card: 'generic',
+      title: `Question ${(args.index ?? 0) + 1}`,
+      kind: 'other',
+    }),
+    presentResult: (_args, result) => ({
+      card: 'generic',
+      title: `Question ${result.id}`,
+      content: `${result.prompt}\n\n(${result.hintCount} hints · ${result.total} questions)`,
+    }),
   }))
 
   ctx.tools.register(defineTool({
@@ -456,6 +481,12 @@ export async function apply(ctx) {
       level = Math.min(Math.max(level, 1), q.hints.length)
       return { hint: q.hints[level - 1], level }
     },
+    presentCall: (_args) => ({ card: 'generic', title: 'Hint', kind: 'other' }),
+    presentResult: (_args, result) => ({
+      card: 'generic',
+      title: `Hint ${result.level}`,
+      content: result.hint,
+    }),
   }))
 
   ctx.tools.register(defineTool({
@@ -489,6 +520,16 @@ export async function apply(ctx) {
       const gap = await controller.recordGap(agent, args)
       return { ok: true, gapId: gap.id }
     },
+    presentCall: (args) => ({
+      card: 'generic',
+      title: `Gap: ${args.topic}`,
+      kind: 'other',
+    }),
+    presentResult: (_args, result) => ({
+      card: 'generic',
+      title: 'Gap recorded',
+      content: `recorded ${result.gapId}`,
+    }),
   }))
 
   ctx.tools.register(defineTool({
@@ -531,6 +572,16 @@ export async function apply(ctx) {
       requireTeacherMode(agent)
       return controller.gradeQuestion(agent, args)
     },
+    presentCall: (args) => ({
+      card: 'generic',
+      title: `Grade ${args.questionId}`,
+      kind: 'other',
+    }),
+    presentResult: (_args, result) => ({
+      card: 'generic',
+      title: 'Grade',
+      content: `Verdict: ${verdictLabel(result.verdict)} — ${result.correct ? 'resolved' : 'gap updated'}`,
+    }),
   }))
 
   ctx.tools.register(defineTool({
@@ -584,5 +635,13 @@ export async function apply(ctx) {
         })),
       }
     },
+    presentCall: () => ({ card: 'generic', title: 'Retest', kind: 'other' }),
+    presentResult: (_args, result) => ({
+      card: 'generic',
+      title: 'Retest',
+      content: result.due.length
+        ? `${result.due.length} gap(s) due — drill them one at a time.`
+        : 'Nothing due right now.',
+    }),
   }))
 }

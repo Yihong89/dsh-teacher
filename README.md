@@ -24,7 +24,7 @@ questions.md  ──▶  /teach questions.md
 
 ## Status
 
-**v0.1.0 — core implemented, tests passing (30/30).**
+**v0.2.0 — core + Web client implemented, tests passing (43/43).**
 
 | Milestone | Status |
 |---|---|
@@ -32,10 +32,25 @@ questions.md  ──▶  /teach questions.md
 | M1 Core Socratic loop (curriculum parser, policy section, 5 tools) | ✅ |
 | M2 Gap ledger + persistence (SQLite + JSON fallback, session events) | ✅ |
 | M3 FSRS-5 spaced retest (official test vector pinned) | ✅ |
-| M4 Web client (quiz cards, gap panel) | ☐ |
-| M5 Publish (dsh-plugin topic, awesome lists) | ☐ |
+| M4 Web client (quiz cards, gaps button + panel, gap projection) | ✅ |
+| M5 Publish (dsh-plugin topic ✓, awesome lists, live e2e) | ◐ |
 
 Design decisions are in [docs/PLAN.md](docs/PLAN.md).
+
+## Web client
+
+Once the plugin is installed and the web profile restarted, the browser bundle
+(`lib/client.js`, registered via `dsh.client`) adds:
+
+- **Quiz cards** — custom `tool.call.toolview` cards for `next_question`,
+  `grade_answer`, `note_gap`, `hint`, and `retest` (question prompt, verdict
+  color-coded by outcome, gap chips by kind).
+- **🧑‍🏫 gaps button** — in the session header action row, shows a due-count badge
+  and opens the gap panel.
+- **Gap panel** — floating overlay listing this session's gaps (kind, topic,
+  due/✓ mastered), fed by the `teacherGaps` session projection (same seam
+  dsh-usage-plugin uses). The durable cross-session ledger stays in `/gaps` and
+  `/retest`.
 
 ## Install
 
@@ -95,11 +110,15 @@ teach. Retrieval practice, spaced reviews, and making the student produce the an
 npm test          # node:test — zero runtime deps beyond DSH itself
 ```
 
-- `lib/` — pure logic (curriculum parser, FSRS-5, grading, folding, ledger); fully
-  unit-tested, no DSH imports.
+- `lib/` — pure logic (curriculum parser, FSRS-5, grading, folding, ledger, gap
+  projection); fully unit-tested, no DSH imports.
 - `index.js` — the Cordis host plugin (prompt section, commands, tools, session
-  events). Written in plain JS (no build step); imports `@deepseek-ai/dsh-tools`
-  at runtime, resolved from the DSH install.
+  events, `teacherGaps` projection). Written in plain JS (no build step); imports
+  `@deepseek-ai/dsh-tools` and `zod` at runtime, resolved from the DSH install /
+  npm.
+- `lib/client.js` — the Web client: a hand-rolled `__ModuleLoader__` bundle
+  (plain JS + `React.createElement`, no build step) declaring `dsh.client` in
+  package.json and registered at the `./client` exports subpath.
 - Ledger location: `$DSH_HOME/state/dsh-teacher/ledger.db` (falls back to `.json`).
 
 ## License

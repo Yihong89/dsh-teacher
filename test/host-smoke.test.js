@@ -27,6 +27,18 @@ function installToolStub() {
     join(dir, 'index.js'),
     'export function defineTool(def) { return def }\n',
   )
+  // zod stub — index.js builds the projection schema with z.object; the
+  // registry mock never validates, so a permissive shape is enough.
+  const zodDir = join(REPO_ROOT, 'node_modules', 'zod')
+  mkdirSync(zodDir, { recursive: true })
+  writeFileSync(
+    join(zodDir, 'package.json'),
+    JSON.stringify({ name: 'zod', type: 'module', main: 'index.js' }),
+  )
+  writeFileSync(
+    join(zodDir, 'index.js'),
+    'export const z = { object: (s) => ({ _shape: s }), array: (x) => x, any: () => "any" }\n',
+  )
   return dir
 }
 
@@ -43,7 +55,7 @@ function mockSession() {
 }
 
 function mockCtx() {
-  const registrations = { sections: [], commands: [], tools: [], events: {} }
+  const registrations = { sections: [], commands: [], tools: [], events: {}, projections: [] }
   const ctx = {
     get: () => undefined,
     on(name, fn) {
@@ -61,6 +73,9 @@ function mockCtx() {
     commands: {
       register: (c) => registrations.commands.push(c),
     },
+    sessionProjections: {
+      register: (def) => registrations.projections.push(def),
+    },
     logger: { warn: () => {} },
   }
   return { ctx, registrations }
@@ -72,7 +87,7 @@ before(() => {
   stubDir = installToolStub()
 })
 
-test('host plugin registers section, commands, and tools', async () => {
+test('host plugin registers section, commands, tools, and the gap projection', async () => {
   const { apply } = await import('../index.js')
   const { ctx, registrations } = mockCtx()
   await apply(ctx)
@@ -89,6 +104,9 @@ test('host plugin registers section, commands, and tools', async () => {
     ['grade_answer', 'hint', 'next_question', 'note_gap', 'retest'],
   )
   assert.ok(registrations.events['agent/pre-step'])
+  assert.equal(registrations.projections.length, 1)
+  assert.equal(registrations.projections[0].key, 'teacherGaps')
+  assert.equal(registrations.projections[0].stateVersion, 1)
 })
 
 test('teacher:policy section is empty until mode is active, then renders policy', async () => {

@@ -323,6 +323,36 @@ committed to `main`. Deviations from this plan, all deliberate:
   still needs a running DSH profile with the plugin installed; unit coverage
   substitutes for it until M5.
 
+### M4 — Web client (v0.2.0, 2025-08)
+
+Implemented as a **hand-rolled `__ModuleLoader__` bundle** (`lib/client.js`, plain
+JS + `React.createElement`, no build step — same zero-build principle as the host
+half). It is declared via `dsh.client` in package.json
+(`platform: web`, `inject: [client-runtime, client-ui-slots]`) and served at the
+`./client` exports subpath, mirroring the shipped `dsh-usage-plugin` conventions:
+
+- **Quiz cards** — `tool.call.toolview` keyed views for `next_question`,
+  `grade_answer`, `note_gap`, `hint`, `retest`; the host tools now ship
+  `presentCall`/`presentResult` so both the default rendering and the custom
+  cards show structured content (question prompt, color-coded verdict, gap
+  chips by kind).
+- **Gaps button + overlay panel** — `conversation.session.header.actions`
+  (id `dsh-teacher-gaps`, due-count badge) and `shell.overlay`
+  (id `dsh-teacher-gaps-panel`); shared in-bundle store for open state.
+- **Gap projection** — host folds `teacher/gap` + `teacher/grade` session events
+  into the `teacherGaps` projection (zod-schema-validated, `stateVersion 1`),
+  read by the client via the slot `useProjection` hook (the dsh-usage-plugin
+  pattern). The projection covers the current session; the durable cross-session
+  ledger remains in `/gaps` and `/retest`.
+- **Tests** — `test/gap-projection.test.js` (pure fold, zero-work contract) and
+  `test/client-bundle.test.js` (evals the bundle with a mocked
+  `__ModuleLoader__` + react stub; asserts registrations and renders the cards
+  against mock `ToolCallOwnerProps`). Total suite: **43/43**.
+- **Deferred to M5:** settings page (`settings.section`), host RPC for the
+  durable ledger in the panel (the `harness` builtin is dynamic-plugin-only in
+  this runtime, so the panel reads the projection instead), and Playwright
+  snapshot tests (needs the plugin installed in a running web profile).
+
 ---
 
 ## 8. Risks & open questions
