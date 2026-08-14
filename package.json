@@ -30,7 +30,6 @@
     "tutor"
   ],
   "dependencies": {
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "zod": "^4.0.0"
   },
   "dsh": {
