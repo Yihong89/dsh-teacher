@@ -424,12 +424,11 @@ export async function apply(ctx) {
         type: 'object',
         additionalProperties: false,
         properties: {
-          id: { type: 'string' },
-          prompt: { type: 'string' },
+          id: { type: 'string', required: true },
+          prompt: { type: 'string', required: true },
           options: { type: 'array', items: { type: 'string' } },
-          total: { type: 'number' },
+          total: { type: 'number', required: true },
         },
-        required: ['id', 'prompt', 'total'],
       },
       render: (args, result) => [{ type: 'text', text: `Question ${result.id}: ${result.prompt}` }],
     },
@@ -474,13 +473,12 @@ export async function apply(ctx) {
         type: 'object',
         additionalProperties: false,
         properties: {
-          ok: { type: 'boolean', const: true },
+          ok: { type: 'boolean', const: true, required: true },
           title: { type: 'string' },
-          questionCount: { type: 'number' },
+          questionCount: { type: 'number', required: true },
           firstQuestionId: { type: 'string' },
           firstPrompt: { type: 'string' },
         },
-        required: ['ok', 'questionCount'],
       },
       render: (_args, result) => [
         { type: 'text', text: `Course imported: ${result.title} — ${result.questionCount} questions. Teacher mode on.` },
@@ -542,8 +540,9 @@ export async function apply(ctx) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { ok: { type: 'boolean', const: true } },
-        required: ['ok'],
+        properties: {
+          ok: { type: 'boolean', const: true, required: true },
+        },
       },
       render: () => [{ type: 'text', text: 'Gap recorded.' }],
     },
@@ -583,8 +582,8 @@ export async function apply(ctx) {
         type: 'object',
         additionalProperties: false,
         properties: {
-          verdict: { type: 'string' },
-          correct: { type: 'boolean' },
+          verdict: { type: 'string', required: true },
+          correct: { type: 'boolean', required: true },
           updated: {
             type: 'array',
             items: {
@@ -592,9 +591,9 @@ export async function apply(ctx) {
               additionalProperties: false,
               properties: { id: { type: 'string' }, status: { type: 'string' } },
             },
+            required: true,
           },
         },
-        required: ['verdict', 'correct', 'updated'],
       },
       render: (args, result) => [
         { type: 'text', text: `Verdict: ${verdictLabel(result.verdict)} (${result.correct ? 'resolved' : 'gap updated'}).` },
@@ -641,9 +640,9 @@ export async function apply(ctx) {
                 kind: { type: 'string' },
               },
             },
+            required: true,
           },
         },
-        required: ['due'],
       },
       render: (_args, result) => [
         { type: 'text', text: result.due.length ? `${result.due.length} gap(s) due.` : 'Nothing due right now.' },
