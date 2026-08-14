@@ -303,6 +303,26 @@ CREATE INDEX idx_gaps_due ON gaps(workspace, status, due_at);
 | **M4** | Web client | Quiz cards + Gap panel via toolview, settings page (mode, escape hatch, data location) | Playwright snapshot tests; panel renders ledger from a real session |
 | **M5** | Publish | README with Model Experience, ACCEPTANCE.md, `dsh-plugin` topic, awesome-dsh submission, npm publish if desired | `dsh-plugin-verify` passes; installable via `dsh plugin` |
 
+### Implementation status (2025-08)
+
+M0–M3 are implemented in `v0.1.0` with **30/30 unit tests passing** (`npm test`),
+committed to `main`. Deviations from this plan, all deliberate:
+
+- **Plain JavaScript instead of TypeScript/tsdown.** No DSH source tree is required
+  to build (`DSH_SOURCE_DIR` linking, as dsh-learn-everything uses). The plugin is
+  zero-build: `package.json` `main` → `index.js`, `cordis.patch.yml` declares the
+  bundle row, and runtime imports (`@deepseek-ai/dsh-tools`) resolve from the DSH
+  install, exactly like the installed `dsh-plugin-manager`.
+- **Tests use `node:test`** (no vitest dependency) and cover only pure logic; the
+  host integration (`index.js`) is syntax-checked and follows the inspected DSH
+  seams (`systemPrompt.section`, `commands.register`, `tools.register`,
+  `session.append`, `agent/pre-step`).
+- **FSRS-5 pinned against the official ts-fsrs interval vector**
+  `[0,4,14,44,125,328,0,0,7,16,34,71,142]` (test/fsrs.test.js).
+- **M3 acceptance marked "e2e"** — the real-model e2e (a live `/teach` session)
+  still needs a running DSH profile with the plugin installed; unit coverage
+  substitutes for it until M5.
+
 ---
 
 ## 8. Risks & open questions

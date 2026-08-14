@@ -1,0 +1,6 @@
+# dsh-teacher bundle patch — applied as a profile layer when the package is
+# installed (declared via package.json "dsh"."bundle"."patch").
+# The row name must match the package name; the entry resolves to package.json main.
+- insert:
+    - id: dsh-teacher
+      name: dsh-teacher
