@@ -1,6 +1,14 @@
-# dsh-teacher bundle patch — applied as a profile layer when the package is
-# installed (declared via package.json "dsh"."bundle"."patch").
-# The row name must match the package name; the entry resolves to package.json main.
-- insert:
-    - id: dsh-teacher
-      name: dsh-teacher
+# dsh-teacher bundle patch — INTENTIONALLY EMPTY.
+#
+# Installing this package into a profile joins the bundle layer but inserts NO
+# plugin row, so dsh-teacher never activates profile-wide and no existing agent
+# sees its tools. It activates only where an explicit row is composed — i.e. in
+# an agent preset that opts in (see the "teacher" preset: a row with
+# `name: dsh-teacher`).
+#
+# To opt a profile in globally (not recommended), uncomment the insert below:
+#
+# - insert:
+#     - id: dsh-teacher
+#       name: dsh-teacher
+[]
