@@ -28,8 +28,7 @@ being told it.
    actually said) into a per-session gap ledger.
 4. **The gaps come back.** The ledger persists. Retesting is **on-demand** — the
    user runs `/retest` whenever they want, and the teacher drills due gaps in FSRS
-   order. If the user stays away 7+ days with gaps pending, the teacher sends one
-   gentle nudge instead of forcing anything.
+   order. Nothing is forced and no notifications are sent.
 
 ### Why this niche is empty
 
@@ -62,13 +61,10 @@ dsh-learn-everything's DSH-native seams. That combination doesn't exist anywhere
   confidence.
 - **U4 (retest, on-demand):** When I ask for it (or type `/retest`), the teacher
   drills the due gaps, grades them, and updates the schedule (mastered → longer
-  interval, still shaky → due again soon). The teacher never forces a retest.
-- **U5 (7-day nudge):** If I haven't been active in the course for 7+ days while
-  gaps are pending, the teacher sends one gentle notice ("3 gaps overdue — retest
-  when you're ready") at session open — a notification, not an interruption.
-- **U6 (status):** `/gaps` shows the ledger: what's shaky, what's due, what's
+  interval, still shaky → due again soon). The teacher never retests on its own.
+- **U5 (status):** `/gaps` shows the ledger: what's shaky, what's due, what's
   mastered. `/teach off` exits teacher mode.
-- **U7 (escape hatch):** I may say "just tell me" — the teacher gives the answer and
+- **U6 (escape hatch):** I may say "just tell me" — the teacher gives the answer and
   marks that gap as *exposed*, so it will be retested sooner, not forgotten.
 
 ---
@@ -139,7 +135,7 @@ time so it cannot accidentally dump answers:
 - **Schema (§6)** tracks `question_id`, `topic`, `evidence`, `confidence`,
   `created_at`, `due_at`, `interval_days`, `ease`, `status`.
 
-### F4 — Spaced retest scheduling (FSRS-5) + inactivity nudge
+### F4 — Spaced retest scheduling (FSRS-5)
 
 - Use the FSRS-5 algorithm (the model behind Anki / drill-me) rather than a naive
   "retest in 3 days":
@@ -148,14 +144,9 @@ time so it cannot accidentally dump answers:
   - a gap that was `exposed` (user gave up) gets a short interval; a confidently-wrong
     gap gets a medium one (hypercorrection effect — confident errors are the most
     correctable).
-- **Retesting is on-demand, never forced.** `due_at` is advisory: `/retest` (or
-  "retest me") drills everything due, sorted by due date; the teacher never
-  interrupts normal conversation with retest rounds.
-- **7-day inactivity notification.** The ledger stores `last_active_at` (any teacher
-  interaction updates it). When a session opens and gaps exist while
-  `now - last_active_at >= 7 days`, the teacher sends exactly one gentle notice
-  ("You have N gaps overdue — retest when you're ready") and otherwise proceeds
-  normally. Notification only — no forced round, at most once per session.
+- **Retesting is on-demand only.** `due_at` is advisory: `/retest` (or "retest me")
+  drills everything due, sorted by due date. The teacher never initiates a retest
+  and sends no notifications.
 - Keep it dependency-free: a compact FSRS-5 implementation (log-linear recurrence,
   ~100 lines) inside the plugin. No external runtime deps.
 
@@ -296,18 +287,7 @@ CREATE TABLE gaps (
   last_reviewed INTEGER
 );
 CREATE INDEX idx_gaps_due ON gaps(workspace, status, due_at);
-
-CREATE TABLE courses (
-  workspace       TEXT NOT NULL,
-  course          TEXT NOT NULL,
-  question_count  INTEGER NOT NULL,
-  last_active_at  INTEGER NOT NULL,        -- epoch ms; bumped by any teacher interaction
-  created_at      INTEGER NOT NULL,
-  PRIMARY KEY (workspace, course)
-);
--- 7-day nudge rule: on session open, if gaps(status='open') exist AND
--- now - courses.last_active_at >= 7 days → notify once (U5). Retesting itself
--- is always on-demand via /retest (U4).
+-- Retesting is purely on-demand via /retest (U4); no notifications.
 ```
 
 ---
@@ -319,7 +299,7 @@ CREATE TABLE courses (
 | **M0** | Scaffold | Repo layout, `cordis.patch.yml`, package.json with `dsh.bundle.patch`, empty host plugin that mounts in a dev profile, vitest setup | Plugin mounts; `/teach on` toggles state with zero errors |
 | **M1** | Core Socratic loop | Curriculum parser, `next_question`/`hint`/`grade_answer` tools, `teacher:policy` section, `/teach on/off` | Real-model e2e: user answers Q1 with a wrong answer → teacher guides → user reaches correct answer → `grade_answer` marks mastered |
 | **M2** | Gap ledger + persistence | `note_gap` tool, `teacher/gap` events, fold(), SQLite ledger, `/gaps` command | Gap survives session restart; `/gaps` lists it; fold round-trip unit-tested |
-| **M3** | FSRS retest + nudge | `fsrs.ts`, `retest` tool, `last_active_at` tracking, 7-day nudge check | fsrs unit tests vs. published FSRS vectors; e2e: gap created on day 1, `/retest` drills it on demand; nudge fires once when `last_active_at` is ≥ 7 days old |
+| **M3** | FSRS retest | `fsrs.ts`, `retest` tool | fsrs unit tests vs. published FSRS vectors; e2e: gap created on day 1, `/retest` drills it on demand and reschedules |
 | **M4** | Web client | Quiz cards + Gap panel via toolview, settings page (mode, escape hatch, data location) | Playwright snapshot tests; panel renders ledger from a real session |
 | **M5** | Publish | README with Model Experience, ACCEPTANCE.md, `dsh-plugin` topic, awesome-dsh submission, npm publish if desired | `dsh-plugin-verify` passes; installable via `dsh plugin` |
 
@@ -331,7 +311,7 @@ CREATE TABLE courses (
 
 | # | Decision |
 |---|---|
-| 1 | **Retest is on-demand** (`/retest` or "retest me"); the teacher never forces it. When a session opens with gaps and **7+ days** passed since the course's last active date, the teacher sends **one gentle notification** — no interruption, at most once per session. |
+| 1 | **Retest is on-demand only** (`/retest` or "retest me"); the teacher never initiates a retest and sends **no notifications** (notification feature deferred). |
 | 2 | **Hard Socratic mode always** — with a knowledge-lack fallback: if the user demonstrably lacks prerequisites (same micro-point failed twice, or explicit "I don't know what X is"), the teacher gives a short, concrete explanation (with example) and then resumes questioning. Never the same question more than twice. |
 | 3 | **Answer keys live in the same markdown file**, as HTML comments (`<!-- answer: ... -->`). The plugin reads the file once, extracts questions and answers, strips keys from everything user/model-visible, and grades against them internally. |
 
@@ -350,9 +330,8 @@ CREATE TABLE courses (
 
 ### Remaining open questions
 
-1. 7-day window: fixed at 7 days, or configurable per course (`Config.nudgeDays`)?
-2. Should the nudge appear in-session only, or also as a system/browser
-   notification (if DSH exposes one)?
+1. FSRS vs. a simpler Leitner ladder for v0.1 (plan defaults to FSRS-5; D5).
+2. Should `/gaps` also show the next due date per gap, or only status + topic?
 
 ---
 
