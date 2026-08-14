@@ -452,11 +452,15 @@ export async function apply(ctx) {
       title: `Question ${(args.index ?? 0) + 1}`,
       kind: 'other',
     }),
-    presentResult: (_args, result) => ({
-      card: 'generic',
-      title: `Question ${result.id}`,
-      content: `${result.prompt}\n\n(${result.total} questions in this course)`,
-    }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      const v = result.value
+      return {
+        card: 'generic',
+        title: `Question ${v.id}`,
+        content: `${v.prompt}\n\n(${v.total} questions in this course)`,
+      }
+    },
   }))
 
   ctx.tools.register(defineTool({
@@ -514,11 +518,15 @@ export async function apply(ctx) {
       }
     },
     presentCall: () => ({ card: 'generic', title: 'Import curriculum', kind: 'other' }),
-    presentResult: (_args, result) => ({
-      card: 'generic',
-      title: 'Course imported',
-      content: `${result.title} — ${result.questionCount} questions. Teacher mode on.`,
-    }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      const v = result.value
+      return {
+        card: 'generic',
+        title: 'Course imported',
+        content: `${v.title} — ${v.questionCount} questions. Teacher mode on.`,
+      }
+    },
   }))
 
   ctx.tools.register(defineTool({
@@ -558,11 +566,15 @@ export async function apply(ctx) {
       title: `Gap: ${args.topic}`,
       kind: 'other',
     }),
-    presentResult: (_args, result) => ({
-      card: 'generic',
-      title: 'Gap recorded',
-      content: `recorded ${result.gapId}`,
-    }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      const v = result.value
+      return {
+        card: 'generic',
+        title: 'Gap recorded',
+        content: `recorded ${v.gapId}`,
+      }
+    },
   }))
 
   ctx.tools.register(defineTool({
@@ -610,11 +622,15 @@ export async function apply(ctx) {
       title: `Grade ${args.questionId}`,
       kind: 'other',
     }),
-    presentResult: (_args, result) => ({
-      card: 'generic',
-      title: 'Grade',
-      content: `Verdict: ${verdictLabel(result.verdict)} — ${result.correct ? 'resolved' : 'gap updated'}`,
-    }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      const v = result.value
+      return {
+        card: 'generic',
+        title: 'Grade',
+        content: `Verdict: ${verdictLabel(v.verdict)} — ${v.correct ? 'resolved' : 'gap updated'}`,
+      }
+    },
   }))
 
   ctx.tools.register(defineTool({
@@ -669,12 +685,16 @@ export async function apply(ctx) {
       }
     },
     presentCall: () => ({ card: 'generic', title: 'Retest', kind: 'other' }),
-    presentResult: (_args, result) => ({
-      card: 'generic',
-      title: 'Retest',
-      content: result.due.length
-        ? `${result.due.length} gap(s) due — drill them one at a time.`
-        : 'Nothing due right now.',
-    }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      const v = result.value
+      return {
+        card: 'generic',
+        title: 'Retest',
+        content: v.due.length
+          ? `${v.due.length} gap(s) due — drill them one at a time.`
+          : 'Nothing due right now.',
+      }
+    },
   }))
 }
