@@ -17,9 +17,9 @@ questions.md  ──▶  /teach on
                       │    └─ "idk" ──▶ gap noted: rebase, evidence="idk", exposed
                       ▼
             gap ledger (persists across sessions)
-                      │  days later: session opens ──▶ retest round on due gaps
-                      ▼
-            "Before anything new — explain rebase to me."
+                      │  you: "/retest" (on-demand)      │  idle 7+ days ──▶ one gentle nudge
+                      ▼                                   ▼
+            "Explain rebase to me."            "3 gaps overdue — retest when ready."
 ```
 
 ## Status
