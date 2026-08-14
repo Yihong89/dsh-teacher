@@ -61,7 +61,7 @@ test('apply registers five toolviews, a header button, and an overlay panel', ()
   const toolviews = entries.filter((e) => e.slot === 'tool.call.toolview')
   assert.deepEqual(
     toolviews.map((e) => e.register().opts.key).sort(),
-    ['grade_answer', 'hint', 'next_question', 'note_gap', 'retest'],
+    ['grade_answer', 'next_question', 'note_gap', 'retest'],
   )
 
   const button = entries.find((e) => e.slot === 'conversation.session.header.actions')

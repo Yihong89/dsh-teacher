@@ -85,16 +85,31 @@ title: Networking review
 ### Teacher behavior (model tools)
 
 - **`next_question`** — pulls one question at a time; the answer key never appears in tool output.
-- **`hint`** — escalating hints, never the answer.
-- **`note_gap`** — records a gap (`wrong | vague | missing | exposed`) with the user's verbatim words + confidence; persisted to the ledger and the session log.
-- **`grade_answer`** — grades against the hidden key; updates each open gap's FSRS schedule; `correct` marks gaps mastered.
+- **`import_curriculum`** — loads any markdown question file: read the raw file, extract each question + correct answer, emit them in the standard format. Used when the automatic parser can't make sense of a file's format.
+- **`note_gap`** — records a gap (`wrong | vague | missing | exposed`) with the user's verbatim words + the knowledge point you identified; persisted to the ledger and the session log.
+- **`grade_answer`** — grades against the hidden answer key; updates each open gap's FSRS schedule; `correct` marks gaps mastered.
 - **`retest`** — returns due gaps; drill them one at a time, then `grade_answer`.
 
 Per the policy section (injected only while teacher mode is active): hard Socratic
-mode — never reveal the answer, one micro-question at a time; **knowledge-lack
-fallback** — the same micro-question fails twice or the user says "I don't know what
-X is" → teach the missing prerequisite explicitly, never repeat the question a third
-time; "just tell me" → answer + record an `exposed` gap.
+mode — never reveal the answer, one micro-question at a time; **hints are generated
+by the teacher** from the user's answers (escalating, never the answer);
+**knowledge-lack fallback** — the same micro-question fails twice or the user says
+"I don't know what X is" → explain the missing knowledge point concisely (definition
++ example), never repeat the question a third time; "just tell me" → answer + record
+an `exposed` gap.
+
+## Input formats
+
+The automatic parser is **format-tolerant**: it recognizes questions in many shapes
+(numbered items, `Q1:` items, `## Q<n>:` headings), answer markers (`→ **Answer:**`,
+`Answer:`, `答案：`, ✅/bold multiple-choice options, `<!-- answer: -->` comments),
+and hints (`> **Key words:**`, `> **Trap:**`, `> 关键词：`, comments). Questions that
+carry no answer/options/hints are treated as prose and skipped.
+
+If a file still won't parse, tell the teacher "import this file" — it converts the
+file with `import_curriculum` (LLM-assisted) into the standard format. The markdown
+file supplies questions and answers; **hints and knowledge points always come from
+the teacher's own generation**, not from the file.
 
 ## Why it exists
 

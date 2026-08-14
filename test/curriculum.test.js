@@ -1,8 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
-  parseCurriculum, stripComments, publicQuestions,
+  parseCurriculum, stripComments, publicQuestions, isCollectionFormat,
 } from '../lib/curriculum.js'
+
+const FIXTURE = readFileSync(
+  join(dirname(dirname(fileURLToPath(import.meta.url))), 'test', 'fixtures', 'wrong-answers-collection.md'),
+  'utf8',
+)
 
 const SAMPLE = `---
 title: Networking review
@@ -79,4 +87,69 @@ test('publicQuestions never exposes answers', () => {
 test('hints inside ### hints without numbers are collected', () => {
   const course = parseCurriculum('## Q1: P?\n### hints\n<!-- gentle nudge -->\n<!-- stronger nudge -->\n')
   assert.deepEqual(course.questions[0].hints, ['gentle nudge', 'stronger nudge'])
+})
+
+// ---- wrong-answers collection format --------------------------------------
+
+test('collection format is auto-detected', () => {
+  assert.ok(isCollectionFormat(FIXTURE))
+  assert.ok(!isCollectionFormat(SAMPLE))
+})
+
+test('collection: title from H1, sections and passages attached', () => {
+  const course = parseCurriculum(FIXTURE)
+  assert.equal(course.title, 'Sample Wrong Answers Collection')
+  const q1 = course.questions.find((q) => q.number === '1')
+  assert.equal(q1.section, 'Fill-in-the-Blank')
+  assert.equal(q1.passage, 'Amphibians')
+})
+
+test('collection: fill-in items get answer + Key words/Trap hints', () => {
+  const course = parseCurriculum(FIXTURE)
+  const q1 = course.questions.find((q) => q.prompt.includes('croak'))
+  assert.equal(q1.answer, 'croaks')
+  assert.equal(q1.hints.length, 2)
+  assert.ok(q1.hints[0].includes('every night'))
+  assert.ok(q1.hints[1].includes('bare form'))
+  assert.ok(!q1.answer.includes('**'))
+})
+
+test('collection: multiple-choice items get options + correct answer', () => {
+  const course = parseCurriculum(FIXTURE)
+  const q43 = course.questions.find((q) => q.number === '43')
+  assert.deepEqual(q43.options, ['rang', 'has rung', 'has been ringing', 'had been ringing'])
+  assert.equal(q43.answer, 'had been ringing')
+  assert.equal(q43.section, 'Multiple Choice')
+})
+
+test('collection: option lines starting with **✅ still parse', () => {
+  const course = parseCurriculum(FIXTURE)
+  const q44 = course.questions.find((q) => q.number === '44')
+  assert.deepEqual(q44.options, ['tasted', 'tastes', 'is tasting', 'has tasted'])
+  assert.equal(q44.answer, 'tasted')
+})
+
+test('collection: restarted numbering gets passage-scoped ids', () => {
+  const course = parseCurriculum(FIXTURE)
+  const ids = course.questions.map((q) => q.id)
+  assert.equal(new Set(ids).size, ids.length)
+  const vt2 = course.questions.find((q) => q.passage === 'Grammar: Verb Tenses' && q.number === '2')
+  assert.equal(vt2.id, 'grammar-verb-tenses-2')
+  assert.equal(course.questions.find((q) => q.passage === 'Amphibians' && q.number === '1').id, 'q1')
+})
+
+test('collection: bare numbered explanation steps are dropped', () => {
+  const course = parseCurriculum(FIXTURE)
+  assert.ok(!course.questions.some((q) => q.prompt.includes('Original object')))
+  assert.equal(course.questions.length, 6)
+})
+
+test('collection: blanks normalized and answers never leaked', () => {
+  const course = parseCurriculum(FIXTURE)
+  const q43 = course.questions.find((q) => q.number === '43')
+  assert.ok(q43.prompt.includes('____'))
+  for (const q of publicQuestions(course)) {
+    assert.ok(!('answer' in q))
+    assert.ok(!('correct' in q))
+  }
 })

@@ -101,7 +101,7 @@ test('host plugin registers section, commands, tools, and the gap projection', a
   )
   assert.deepEqual(
     registrations.tools.map((t) => t.name).sort(),
-    ['grade_answer', 'hint', 'next_question', 'note_gap', 'retest'],
+    ['grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'retest'],
   )
   assert.ok(registrations.events['agent/pre-step'])
   assert.equal(registrations.projections.length, 1)
@@ -122,7 +122,7 @@ test('teacher:policy section is empty until mode is active, then renders policy'
   const text = section.text({ agent })
   assert.ok(text.includes('教师模式'))
   assert.ok(text.includes('永不直接给出答案'))
-  assert.ok(text.includes('知识缺失回退'))
+  assert.ok(text.includes('知识缺口回退'))
 })
 
 test('/teach <path> loads the sample course and enters teacher mode', async () => {
@@ -159,6 +159,45 @@ test('/teach off and empty state reporting', async () => {
 
   const on = await teach.handler({ agent, rawInput: 'on' })
   assert.ok(on.text.includes('No course loaded'))
+})
+
+test('import_curriculum loads a converted course and enters teacher mode', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+
+  const agent = { session: mockSession() }
+  const result = await imp.execute({
+    courseTitle: 'My Deck',
+    sourcePath: 'notes.md',
+    markdown: [
+      '## Q1: What is TCP?',
+      '<!-- answer: a reliable connection-oriented protocol -->',
+      '## Q2: Choose one.',
+      '<!-- options: A. x | B. y -->',
+      '<!-- answer: B -->',
+    ].join('\n'),
+  }, { agent })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.questionCount, 2)
+  assert.equal(result.title, 'My Deck')
+  const mode = agent.session.events.find((e) => e.type === 'teacher/mode')
+  assert.ok(mode && mode.data.active === true)
+  assert.equal(mode.data.course, 'My Deck')
+})
+
+test('import_curriculum rejects a conversion with no questions', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const agent = { session: mockSession() }
+  await assert.rejects(
+    () => imp.execute({ courseTitle: 'Empty', markdown: '# Just prose\nno questions here' }, { agent }),
+    /no questions found/,
+  )
 })
 
 test.after(() => {
