@@ -927,6 +927,7 @@ export async function apply(ctx) {
         additionalProperties: false,
         properties: {
           ok: { type: 'boolean', const: true, required: true },
+          gapId: { type: 'string' },
         },
       },
       render: () => [{ type: 'text', text: 'Gap recorded.' }],
