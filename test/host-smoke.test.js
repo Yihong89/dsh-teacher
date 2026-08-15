@@ -323,3 +323,20 @@ test.after(() => {
   delete process.env.DSH_TEACHER_LEDGER
   delete process.env.DSH_HOME
 })
+
+test('next_question output is lossless JSON (options omitted when absent)', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const nq = registrations.tools.find((t) => t.name === 'next_question')
+
+  const agent = { session: mockSession('/next-q-ls-workspace') }
+  await imp.execute({ courseTitle: 'LS', markdown: '## Q1: A?\n<!-- answer: a -->\n' }, { agent })
+  const result = await nq.execute({ index: 0 }, { agent })
+
+  // The returned object must round-trip through JSON losslessly: a bare
+  // `options: undefined` key would be dropped and fail dsh validation.
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), result)
+  assert.equal('options' in result, false)
+})

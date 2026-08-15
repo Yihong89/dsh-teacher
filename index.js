@@ -614,7 +614,7 @@ export async function apply(ctx) {
       return {
         id: q.id,
         prompt: q.prompt,
-        options: q.options ?? undefined,
+        ...(Array.isArray(q.options) && q.options.length > 0 ? { options: q.options } : {}),
         total: course.questions.length,
       }
     },
