@@ -496,6 +496,20 @@ class TeacherController {
     const store = await this.storeHandle()
     const run = store.store.getQuizRun(runId)
     if (run === null) throw new Error(`quiz run ${runId} not found`)
+    // The grading tools grade against the session's ACTIVE course — switch it
+    // to the run's course so grade_answer / note_gap work even when the user
+    // quizzed a different subject than the session's current one.
+    if (run.course !== null) {
+      this.sessions.set(this.sessionKey(agent), {
+        course: run.course,
+        coursePath: run.course.source ?? 'from-run',
+      })
+      try {
+        store.store.setSelectedCourseId(run.workspace, run.course.courseId)
+      } catch (error) {
+        this.ctx.logger?.warn?.(`dsh-teacher: failed to record run course selection: ${error}`)
+      }
+    }
     const byQid = new Map((run.course?.questions ?? []).map((q) => [q.id, q]))
     const questions = (run.answers ?? []).map((a) => {
       const q = byQid.get(String(a.qid))
