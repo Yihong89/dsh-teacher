@@ -251,6 +251,9 @@ class TeacherController {
         source: source ?? null,
         questions: course.questions,
       })
+      // Loading a course makes it this workspace's selected course, so fresh
+      // sessions hydrate the subject the user last worked on.
+      store.store.setSelectedCourseId(workspace, courseId)
     } catch (error) {
       this.ctx.logger?.warn?.(`dsh-teacher: failed to persist course: ${error}`)
     }
