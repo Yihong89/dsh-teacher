@@ -580,3 +580,18 @@ Host side:
    accepts `teacher/quiz-run`.
 5. Manual e2e on the mini: `/teach questions.md` → `/quiz` → popup answers → auto
    analysis → Socratic walk of misses.
+
+### 10.9 Extension: multiple subject courses per workspace
+
+The quiz store supports **multiple courses per workspace** (English, Science,
+Chinese, Math … coexist):
+
+- `upsertCourse` keys by `(workspace, title)`: re-importing the same title
+  replaces that course (id kept), different titles create separate courses;
+  nothing else in the workspace is touched.
+- `preferences` table remembers the workspace's **selected course**; new
+  sessions hydrate it (logged courseId → selection → latest → legacy).
+- `/course` command lists courses and switches the active one; the quiz popup
+  renders a **course picker** (`GET /dsh-teacher/courses` +
+  `POST /dsh-teacher/course/select`) so a teacher session can switch subjects
+  without any LLM involvement.

@@ -126,10 +126,11 @@ class TeacherController {
   courseOf(agent) {
     const cached = this.stateOf(agent)?.course ?? null
     if (cached !== null) return cached
-    // Fresh process: reload the persisted course for this workspace from the
-    // SQLite question store (legacy v0.2 JSON course imported once as fallback).
-    const workspace = this.workspaceOf(agent)
-    const restored = this.restoreCourse(workspace)
+    // Fresh process: reload the persisted course for this session/workspace
+    // from the SQLite question store (legacy v0.2 JSON course imported once as
+    // fallback). The session's logged course wins, then the workspace's
+    // selected course, then the most recently updated course in the workspace.
+    const restored = this.restoreCourse(agent)
     if (restored !== null) {
       this.sessions.set(this.sessionKey(agent), {
         course: restored.course,
@@ -140,11 +141,22 @@ class TeacherController {
     return null
   }
 
-  /** Restore a persisted course for a workspace: DB first, legacy JSON fallback. */
-  restoreCourse(workspace) {
+  /** Restore a persisted course: logged courseId → workspace selection → latest → legacy JSON. */
+  restoreCourse(agent) {
+    const workspace = this.workspaceOf(agent)
     const store = this.questionStore?.store
     if (store !== undefined) {
       try {
+        const lastCourse = foldTeacherState(agent.session.events).lastCourse
+        if (lastCourse !== null && lastCourse.courseId != null) {
+          const byId = store.courseById(lastCourse.courseId)
+          if (byId !== null) return { course: byId, source: byId.source }
+        }
+        const selectedId = store.getSelectedCourseId(workspace)
+        if (selectedId !== null) {
+          const byId = store.courseById(selectedId)
+          if (byId !== null && byId.workspace === workspace) return { course: byId, source: byId.source }
+        }
         const db = store.latestCourse(workspace)
         if (db !== null) return { course: db, source: db.source }
       } catch (error) {
@@ -192,7 +204,7 @@ class TeacherController {
     if (foldTeacherState(agent.session.events).lastCourse !== null) return false
     if (this.stateOf(agent)?.course != null) return false
     const workspace = this.workspaceOf(agent)
-    let restored = this.restoreCourse(workspace)
+    let restored = this.restoreCourse(agent)
     // Fallback: a session without a real cwd (workspaceOf = session id)
     // inherits the most recently updated directory-keyed course, so a fresh
     // session on a picked workspace still sees the loaded question bank.
@@ -655,6 +667,69 @@ export async function apply(ctx) {
         }
       },
     })
+
+    // Course picker for the LLM-free quiz popup: list every course, and switch
+    // the workspace's selected course (returns its public questions so the
+    // popup renders immediately; the session syncs via hydration on the next
+    // step). Never serves answer keys.
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-teacher/courses',
+      handler: async (_req, res) => {
+        try {
+          const store = await controller.storeHandle()
+          const courses = store.store.listAllCourses()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, courses }))
+        } catch (error) {
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: String(error?.message ?? error) }))
+        }
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-teacher/course/select',
+      handler: async (req, res) => {
+        let body = ''
+        for await (const chunk of req) body += chunk
+        let payload = null
+        try {
+          payload = JSON.parse(body)
+        } catch {
+          /* malformed → 400 below */
+        }
+        const courseId = Number(payload?.courseId)
+        const respond = (status, value) => {
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(value))
+        }
+        if (!Number.isInteger(courseId)) {
+          respond(400, { ok: false, error: 'courseId is required' })
+          return
+        }
+        try {
+          const store = await controller.storeHandle()
+          const course = store.store.courseById(courseId)
+          if (course === null) {
+            respond(404, { ok: false, error: `course ${courseId} not found` })
+            return
+          }
+          store.store.setSelectedCourseId(course.workspace, courseId)
+          respond(200, {
+            ok: true,
+            course: {
+              courseId: course.courseId,
+              workspace: course.workspace,
+              title: course.title,
+              questions: course.questions.map((q) => publicQuestion(q)),
+            },
+          })
+        } catch (error) {
+          respond(500, { ok: false, error: String(error?.message ?? error) })
+        }
+      },
+    })
   }
 
   // Conditional Socratic policy section — empty unless teacher mode is active.
@@ -801,6 +876,61 @@ export async function apply(ctx) {
             '',
             'Use the retest tool to pull these, then grade_answer after each.',
           ].join('\n'),
+        }
+      },
+    })
+
+    commandCtx.commands.register({
+      name: 'course',
+      description: 'List the courses in this workspace, or switch the active course by title',
+      input: { hint: '[<title>]' },
+      handler: async ({ agent, rawInput }) => {
+        const workspace = controller.workspaceOf(agent)
+        const store = await controller.storeHandle()
+        const courses = store.store.listCourses(workspace)
+        const name = rawInput.trim()
+        if (name === '') {
+          if (courses.length === 0) {
+            return { kind: 'success', text: 'No courses in this workspace yet. Run /teach <path-to-questions.md> to load one.' }
+          }
+          const current = controller.courseOf(agent)
+          return {
+            kind: 'success',
+            text: [
+              `Courses in this workspace (${courses.length}):`,
+              ...courses.map((c) => `- ${c.title} (${c.questionCount} questions)${current !== null && current.title === c.title ? ' ← active' : ''}`),
+              '',
+              'Switch with /course <title>.',
+            ].join('\n'),
+          }
+        }
+        const match = courses.find((c) => c.title.toLowerCase() === name.toLowerCase())
+        if (match === undefined) {
+          return {
+            kind: 'error',
+            text: `No course named "${name}". Available: ${courses.map((c) => c.title).join(', ') || 'none'}.`,
+          }
+        }
+        const byId = store.store.courseById(match.courseId)
+        if (byId === null) return { kind: 'error', text: `Course "${match.title}" could not be loaded.` }
+        controller.sessions.set(controller.sessionKey(agent), {
+          course: byId,
+          coursePath: byId.source ?? 'switched',
+        })
+        store.store.setSelectedCourseId(workspace, match.courseId)
+        try {
+          agent.session.append(COURSE_EVENT, {
+            courseId: byId.courseId,
+            title: byId.title,
+            source: byId.source ?? null,
+            questions: byId.questions.map((q) => publicQuestion(q)),
+          })
+        } catch (error) {
+          controller.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/course: ${error}`)
+        }
+        return {
+          kind: 'success',
+          text: `Active course: ${byId.title} — ${byId.questions.length} questions. Say "start" to begin, or open the quiz popup (📝).`,
         }
       },
     })

@@ -126,7 +126,7 @@ test('host plugin registers section, commands, tools, and the gap projection', a
 
   assert.deepEqual(
     registrations.commands.map((c) => c.name).sort(),
-    ['gaps', 'quiz', 'retest', 'summary', 'teach'],
+    ['course', 'gaps', 'quiz', 'retest', 'summary', 'teach'],
   )
   assert.deepEqual(
     registrations.tools.map((t) => t.name).sort(),
@@ -507,4 +507,40 @@ test('hydration falls back to the latest directory-keyed course for cwd-less ses
   const courseEvent = noCwd.session.events.find((e) => e.type === 'teacher/course')
   assert.ok(courseEvent, 'cwd-less session hydrated from directory fallback')
   assert.equal(courseEvent.data.title, 'DirCourse')
+})
+
+test('/course lists courses and switches the active one', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const courseCmd = registrations.commands.find((c) => c.name === 'course')
+  const nq = registrations.tools.find((t) => t.name === 'next_question')
+
+  const agent = { session: mockSession('/course-ws') }
+  await imp.execute({ courseTitle: 'English', markdown: '## Q1: A?\n<!-- answer: a -->\n' }, { agent })
+  await imp.execute({ courseTitle: 'Science', markdown: '## Q1: X?\n<!-- answer: x -->\n## Q2: Y?\n<!-- answer: y -->\n' }, { agent })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  // list shows both, active is the most recent (Science)
+  const listed = await courseCmd.handler({ agent, rawInput: '' })
+  assert.ok(listed.text.includes('English'))
+  assert.ok(listed.text.includes('Science'))
+  assert.ok(listed.text.includes('← active'))
+
+  // switch to English
+  const switched = await courseCmd.handler({ agent, rawInput: 'english' })
+  assert.equal(switched.kind, 'success')
+  assert.ok(switched.text.includes('English'))
+  const courseEvent = agent.session.events.filter((e) => e.type === 'teacher/course').at(-1)
+  assert.equal(courseEvent.data.title, 'English')
+
+  // the tools now use the switched course
+  const q = await nq.execute({ index: 0 }, { agent })
+  assert.equal(q.total, 1)
+  assert.ok(q.prompt.includes('A?'))
+
+  // unknown title errors
+  const missing = await courseCmd.handler({ agent, rawInput: 'nope' })
+  assert.equal(missing.kind, 'error')
 })

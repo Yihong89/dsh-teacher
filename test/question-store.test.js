@@ -59,16 +59,68 @@ for (const kind of ['db', 'json']) {
     })
   })
 
-  test(`[${kind}] upsert replaces the previous course for the same workspace`, async () => {
+  test(`[${kind}] multiple courses with different titles coexist per workspace`, async () => {
+    await withStore(kind, (store) => {
+      const ws = '/ws/multi'
+      const englishId = store.upsertCourse({ workspace: ws, title: 'English', source: 'en.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
+      const scienceId = store.upsertCourse({ workspace: ws, title: 'Science', source: 'sc.md', questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n## Q2: Y?\n<!-- answer: y -->\n').questions })
+      const mathId = store.upsertCourse({ workspace: ws, title: 'Math', source: 'ma.md', questions: parseCurriculum('## Q1: M?\n<!-- answer: m -->\n').questions })
+
+      const listed = store.listCourses(ws)
+      assert.equal(listed.length, 3)
+      assert.deepEqual(listed.map((c) => c.title).sort(), ['English', 'Math', 'Science'])
+      const byTitle = Object.fromEntries(listed.map((c) => [c.title, c]))
+      assert.equal(byTitle.English.questionCount, 1)
+      assert.equal(byTitle.Science.questionCount, 2)
+
+      // latest is the most recently updated course
+      assert.equal(store.latestCourse(ws).title, 'Math')
+      // courseById still resolves each
+      assert.equal(store.courseById(englishId).title, 'English')
+      assert.equal(store.courseById(scienceId).title, 'Science')
+      assert.equal(store.courseById(mathId).title, 'Math')
+    })
+  })
+
+  test(`[${kind}] upserting the same title replaces that course (id kept, others untouched)`, async () => {
     await withStore(kind, (store) => {
       const ws = '/ws/replace'
-      store.upsertCourse({ workspace: ws, title: 'Old', source: 'a.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
-      const courseId = store.upsertCourse({ workspace: ws, title: 'New', source: 'b.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n## Q2: B?\n<!-- answer: b -->\n').questions })
-      const latest = store.latestCourse(ws)
-      assert.equal(latest.title, 'New')
-      assert.equal(latest.questions.length, 2)
-      assert.equal(latest.courseId, courseId)
-      assert.equal(store.latestCourse(ws).courseId, courseId)
+      const englishId = store.upsertCourse({ workspace: ws, title: 'English', source: 'a.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
+      const scienceId = store.upsertCourse({ workspace: ws, title: 'Science', source: 's.md', questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n').questions })
+
+      const again = store.upsertCourse({ workspace: ws, title: 'English', source: 'b.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n## Q2: B?\n<!-- answer: b -->\n').questions })
+      assert.equal(again, englishId, 'same title keeps the course id')
+
+      const listed = store.listCourses(ws)
+      assert.equal(listed.length, 2, 'English replaced, Science untouched')
+      const english = listed.find((c) => c.title === 'English')
+      assert.equal(english.questionCount, 2)
+      assert.equal(store.latestCourse(ws).title, 'English')
+      assert.equal(store.courseById(scienceId).questions.length, 1)
+    })
+  })
+
+  test(`[${kind}] course selection preference round-trips per workspace`, async () => {
+    await withStore(kind, (store) => {
+      const ws = '/ws/pref'
+      const a = store.upsertCourse({ workspace: ws, title: 'A', source: null, questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
+      const b = store.upsertCourse({ workspace: ws, title: 'B', source: null, questions: parseCurriculum('## Q1: B?\n<!-- answer: b -->\n').questions })
+      assert.equal(store.getSelectedCourseId(ws), null)
+      store.setSelectedCourseId(ws, b)
+      assert.equal(store.getSelectedCourseId(ws), b)
+      store.setSelectedCourseId(ws, a)
+      assert.equal(store.getSelectedCourseId(ws), a)
+    })
+  })
+
+  test(`[${kind}] listAllCourses returns every course with workspace and counts`, async () => {
+    await withStore(kind, (store) => {
+      store.upsertCourse({ workspace: '/ws/one', title: 'English', source: null, questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
+      store.upsertCourse({ workspace: '/ws/two', title: 'Math', source: null, questions: parseCurriculum('## Q1: M?\n<!-- answer: m -->\n').questions })
+      const all = store.listAllCourses()
+      assert.equal(all.length, 2)
+      assert.deepEqual(all.map((c) => c.title).sort(), ['English', 'Math'])
+      assert.ok(all.every((c) => typeof c.workspace === 'string' && c.questionCount === 1))
     })
   })
 
