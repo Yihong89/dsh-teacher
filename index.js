@@ -28,7 +28,7 @@ import { buildPolicy } from './lib/policy.js'
 import { LedgerStore, gapId, GAP_STATUS } from './lib/ledger.js'
 import { QuestionStore, questionStoreFilePath, publicQuestion } from './lib/question-store.js'
 import { quizProjectionWith } from './lib/quiz-projection.js'
-import { foldTeacherState, hasOpenTurn, MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT, SPEAK_EVENT } from './lib/fold.js'
+import { foldTeacherState, hasOpenTurn, MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT, SPEAK_EVENT, SPOKEN_EVENT } from './lib/fold.js'
 import { gapProjectionWith } from './lib/gap-projection.js'
 import {
   buildGap, gapKindForVerdict, isCorrect, ratingForVerdict, verdictLabel,
@@ -45,7 +45,7 @@ import { FSRS, createCard, review } from './lib/fsrs.js'
  * first read of a process, the profile-boot registrar (`dsh-teacher/
  * register-events`) runs first (see lib/register-events.js).
  */
-for (const type of [MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT, SPEAK_EVENT]) {
+for (const type of [MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT, SPEAK_EVENT, SPOKEN_EVENT]) {
   KNOWN_SESSION_EVENT_TYPES.add(type)
 }
 
@@ -669,6 +669,7 @@ export async function apply(ctx) {
           quizActive: z.boolean(),
           lastRun: z.any(),
           speakEnabled: z.boolean(),
+          lastSpoken: z.any(),
         }),
       ),
     )
@@ -1614,6 +1615,47 @@ export async function apply(ctx) {
     },
   }))
 
+  ctx.tools.register(defineTool({
+    name: 'speak',
+    description:
+      'Use only in teacher mode. Ask that text be spoken aloud to the learner. The speech is played by the browser on the user\'s own machine — this tool only records the request. Read the question, hint, or a short confirmation so the learner can hear it — keep the spoken text to 1–2 short sentences. Respect /speak off (TTS muted).',
+    parameters: {
+      text: { type: 'string', required: true, description: 'Text to speak aloud.' },
+      voice: { type: 'string', description: 'Preferred voice language hint (e.g. "en-US", "zh-CN"); the browser picks a matching voice.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+        },
+      },
+      render: (_args, result) => [
+        { type: 'text', text: result.ok ? 'Speech requested.' : 'speak failed' },
+      ],
+    },
+    execute: async (args, exec) => {
+      const agent = exec.agent
+      if (agent === undefined) throw new Error('speak requires a calling agent')
+      requireTeacherMode(agent)
+      try {
+        agent.session.append(SPOKEN_EVENT, {
+          text: String(args.text ?? ''),
+          voice: args.voice ?? null,
+        })
+      } catch (error) {
+        this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/spoken: ${error}`)
+        throw error
+      }
+      return { ok: true }
+    },
+    presentCall: (args) => ({ card: 'generic', title: 'Speak', kind: 'other' }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      return { card: 'generic', title: 'Speech requested', content: 'The browser will read it aloud on the user\'s machine.' }
+    },
+  }))
 }
 
 export { TeacherController }

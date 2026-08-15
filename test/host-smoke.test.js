@@ -130,7 +130,7 @@ test('host plugin registers section, commands, tools, and the gap projection', a
   )
   assert.deepEqual(
     registrations.tools.map((t) => t.name).sort(),
-    ['analyze_quiz', 'grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'quiz', 'retest', 'summary'],
+    ['analyze_quiz', 'grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'quiz', 'retest', 'speak', 'summary'],
   )
   assert.ok(registrations.events['agent/pre-step'])
   assert.deepEqual(
@@ -180,7 +180,7 @@ test('teacher:policy section is empty until mode is active, then renders policy'
   assert.ok(quizText.includes('analyze_quiz'))
   assert.ok(quizText.includes('📝'))
   // TTS rule renders by default
-  assert.ok(text.includes('TTS 朗读工具'))
+  assert.ok(text.includes('speak 工具'))
 })
 
 test('/teach <path> loads the sample course and enters teacher mode', async () => {
@@ -262,7 +262,7 @@ test('import_curriculum rejects a conversion with no questions', async () => {
 test('event types are registered with the harness persistence catalog', async () => {
   const { KNOWN_SESSION_EVENT_TYPES } = await import('@deepseek-ai/dsh-session')
   // index.js registers at module load
-  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz', 'teacher/course', 'teacher/quiz-run', 'teacher/speak']) {
+  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz', 'teacher/course', 'teacher/quiz-run', 'teacher/speak', 'teacher/spoken']) {
     assert.ok(KNOWN_SESSION_EVENT_TYPES.has(type), `expected ${type} registered`)
   }
   // the profile-boot registrar (dsh-teacher/register-events) registers too
@@ -636,4 +636,20 @@ test('the shared course pool is global — importing the same title from any ses
   const english = res.courses.filter((c) => c.title === 'English')
   assert.equal(english.length, 1, 'one shared course per title — no duplicates')
   assert.equal(english[0].workspace, 'global')
+})
+
+test('speak tool records a teacher/spoken event for the browser to play', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const speak = registrations.tools.find((t) => t.name === 'speak')
+
+  const agent = { session: mockSession('/speak-ws') }
+  agent.session.append('teacher/mode', { active: true, course: null })
+  const result = await speak.execute({ text: 'Hello, learner!', voice: 'en-US' }, { agent })
+  assert.equal(result.ok, true)
+  const spoken = agent.session.events.find((e) => e.type === 'teacher/spoken')
+  assert.ok(spoken, 'teacher/spoken event appended')
+  assert.equal(spoken.data.text, 'Hello, learner!')
+  assert.equal(spoken.data.voice, 'en-US')
 })
