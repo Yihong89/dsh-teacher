@@ -197,3 +197,33 @@ test('publicQuestion includes options and hints but never the answer', () => {
     id: 'q1', prompt: 'P?', hintCount: 1, hints: ['h1'], options: ['A', 'B'], section: 'S',
   })
 })
+
+for (const kind of ['db', 'json']) {
+  test(`[${kind}] latestPendingRun finds the most recent un-analyzed run per workspace`, async () => {
+    await withStore(kind, (store) => {
+      const ws = '/ws/pending'
+      const cid = store.upsertCourse({ workspace: ws, title: 'S', source: null, questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n').questions })
+      assert.equal(store.latestPendingRun(ws), null)
+      const { runId: r1 } = store.createQuizRun({ workspace: ws, courseId: cid, answers: [{ qid: 'q1', answer: 'a' }] })
+      const { runId: r2 } = store.createQuizRun({ workspace: ws, courseId: cid, answers: [{ qid: 'q1', answer: 'b' }] })
+      const pending = store.latestPendingRun(ws)
+      assert.equal(pending.runId, r2, 'most recent pending run wins')
+      store.markQuizRunAnalyzed(r2, null)
+      assert.equal(store.latestPendingRun(ws).runId, r1, 'analyzed runs are skipped')
+      // other workspaces are not mixed in
+      store.upsertCourse({ workspace: '/ws/other', title: 'O', source: null, questions: parseCurriculum('## Q1: Y?\n<!-- answer: y -->\n').questions })
+      assert.equal(store.latestPendingRun('/ws/other'), null)
+    })
+  })
+
+  test(`[${kind}] latestPendingRunDirectory scopes to real directory workspaces`, async () => {
+    await withStore(kind, (store) => {
+      const dirCid = store.upsertCourse({ workspace: '/ws/dir', title: 'D', source: null, questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n').questions })
+      const sessCid = store.upsertCourse({ workspace: 'session-abc', title: 'S', source: null, questions: parseCurriculum('## Q1: Y?\n<!-- answer: y -->\n').questions })
+      store.createQuizRun({ workspace: 'session-abc', courseId: sessCid, answers: [{ qid: 'q1', answer: 'a' }] })
+      const { runId } = store.createQuizRun({ workspace: '/ws/dir', courseId: dirCid, answers: [{ qid: 'q1', answer: 'b' }] })
+      const found = store.latestPendingRunDirectory()
+      assert.equal(found.runId, runId, 'session-id workspaces are excluded')
+    })
+  })
+}

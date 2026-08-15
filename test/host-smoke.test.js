@@ -544,3 +544,43 @@ test('/course lists courses and switches the active one', async () => {
   const missing = await courseCmd.handler({ agent, rawInput: 'nope' })
   assert.equal(missing.kind, 'error')
 })
+
+test('finishing a quiz auto-enters teacher mode and surfaces the pending run at pre-step', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx({ webServer: true })
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const preStep = registrations.events['agent/pre-step'][0]
+  const route = registrations.webRoutes.find((r) => r.path === '/dsh-teacher/quiz/submit')
+
+  const agent = { session: mockSession('/auto-mode-ws') }
+  await imp.execute({ courseTitle: 'Auto', markdown: '## Q1: A?\n<!-- answer: a -->\n' }, { agent })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  const courseEvent = agent.session.events.find((e) => e.type === 'teacher/course')
+  // import_curriculum turns mode on; turn it off to exercise the auto-enter path.
+  agent.session.append('teacher/mode', { active: false, course: null })
+
+  // User finishes the quiz (popup POST) → run stored, no teacher mode yet.
+  const req = {
+    [Symbol.asyncIterator]: async function* () {
+      yield JSON.stringify({ courseId: courseEvent.data.courseId, answers: [{ qid: 'q1', answer: 'b' }] })
+    },
+  }
+  let status = 0
+  await route.handler(req, { writeHead: (s) => { status = s }, end: () => {} })
+  assert.equal(status, 200)
+  const lastModeAfterSubmit = agent.session.events.filter((e) => e.type === 'teacher/mode').at(-1)
+  assert.ok(lastModeAfterSubmit && lastModeAfterSubmit.data.active === false, 'mode still off right after submit')
+
+  // Next pre-step (any user message) auto-enters teacher mode + surfaces the run.
+  await preStep({ agent }, () => {})
+  const mode = agent.session.events.find((e) => e.type === 'teacher/mode')
+  assert.ok(mode && mode.data.active === true, 'teacher mode auto-entered')
+  const runEvent = agent.session.events.find((e) => e.type === 'teacher/quiz-run')
+  assert.ok(runEvent && runEvent.data.status === 'pending', 'pending run surfaced for the policy')
+
+  // Idempotent: a second pre-step does not re-append mode/run events.
+  const before = agent.session.events.length
+  await preStep({ agent }, () => {})
+  assert.equal(agent.session.events.length, before)
+})

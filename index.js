@@ -314,6 +314,43 @@ class TeacherController {
     }
   }
 
+  /**
+   * Auto-enter teacher mode after a quiz: if the session is not in teacher
+   * mode yet but a finished quiz run is waiting (submitted by the LLM-free
+   * popup), turn mode on and surface the run so the policy guides the model
+   * to analyze it. This is what makes "finish the quiz → the teacher takes
+   * over" work without the user typing /teach on.
+   */
+  async autoEnterTeacherMode(agent) {
+    const folded = foldTeacherState(agent.session.events)
+    if (folded.active) return
+    const workspace = this.workspaceOf(agent)
+    let store
+    try {
+      store = await this.storeHandle()
+    } catch (error) {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to open store for auto mode: ${error}`)
+      return
+    }
+    let run = store.store.latestPendingRun(workspace)
+    // cwd-less session fallback: pick the most recent pending run of any
+    // directory-keyed workspace.
+    if (run === null && !workspace.startsWith('/') && !workspace.startsWith('~')) {
+      try {
+        run = store.store.latestPendingRunDirectory()
+      } catch (error) {
+        this.ctx.logger?.warn?.(`dsh-teacher: failed to find pending run: ${error}`)
+      }
+    }
+    if (run === null) return
+    this.set(agent, true)
+    try {
+      agent.session.append(QUIZ_RUN_EVENT, { runId: run.runId, status: 'pending' })
+    } catch (error) {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/quiz-run: ${error}`)
+    }
+  }
+
   /** Apply one pending selection before the next request assembly. */
   flushPending(agent) {
     const key = this.sessionKey(agent)
@@ -587,10 +624,12 @@ export async function apply(ctx) {
   void controller.storeHandle().catch(() => {})
 
   // Apply any queued teacher-mode selection before the next request assembly,
-  // and hydrate a fresh session's course from the persisted store (so the quiz
-  // popup is available without a re-import; it still only opens on request).
+  // hydrate a fresh session's course from the persisted store, and auto-enter
+  // teacher mode when a finished quiz run is waiting (so the teacher analyzes
+  // it without the user typing /teach on).
   ctx.on('agent/pre-step', async ({ agent }, next) => {
     controller.hydrateSession(agent)
+    await controller.autoEnterTeacherMode(agent)
     controller.flushPending(agent)
     return next()
   })
