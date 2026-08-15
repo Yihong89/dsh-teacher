@@ -242,3 +242,30 @@ test('latestAssistantText skips running steps and returns null when no assistant
   }
   assert.equal(latestAssistantText(session), null)
 })
+
+test('speak cursor key is per-session and survives reloads (no re-reading old messages)', () => {
+  const { moduleObj } = loadBundle()
+  const { SPEAK_CURSOR_KEY } = moduleObj._test
+  assert.equal(SPEAK_CURSOR_KEY, 'dsh-teacher.spoken-cursor')
+  // Simulate the cursor semantics used by SpeakToggle: stored per sessionId,
+  // and a message whose seq <= cursor.seq for the same session is not spoken.
+  const store = new Map()
+  const localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  }
+  globalThis.window = Object.assign({}, globalThis.window, { localStorage })
+  // After speaking seq 10 in session s1, switching back to s1 must not re-speak.
+  store.set(SPEAK_CURSOR_KEY, JSON.stringify({ sessionId: 's1', seq: 10 }))
+  const cursor = JSON.parse(localStorage.getItem(SPEAK_CURSOR_KEY))
+  assert.equal(cursor.sessionId, 's1')
+  assert.equal(cursor.seq, 10)
+  // Same session, old message seq → skip.
+  assert.equal(cursor.sessionId === 's1' && cursor.seq >= 8, true)
+  // Same session, NEW message seq → speak.
+  assert.equal(cursor.sessionId === 's1' && cursor.seq >= 12, false)
+  // Different session → speak regardless of cursor.
+  assert.equal(cursor.sessionId === 's2', false)
+  delete globalThis.window
+})
