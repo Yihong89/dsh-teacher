@@ -546,11 +546,15 @@ class TeacherController {
   }
 
   /** Persist one gap: session event + durable ledger row (with FSRS card fields). */
+  /**
+   * Persist one gap: session event + durable ledger row (with FSRS card fields).
+   * The course comes from the caller (`input.courseTitle`) or the session's
+   * loaded course — no course has to be loaded for the LLM to record a gap.
+   */
   async recordGap(agent, input) {
     const state = this.stateOf(agent)
-    if (state === null) throw new Error('no course loaded')
     const workspace = this.workspaceOf(agent)
-    const courseTitle = state.course.title ?? 'untitled'
+    const courseTitle = (input.courseTitle ?? state?.course?.title) ?? 'untitled'
     const ledger = await this.ledgerHandle()
     const existing = ledger.store.gapsForQuestion(workspace, courseTitle, input.questionId)
     const now = nowMs()
@@ -574,13 +578,12 @@ class TeacherController {
   }
 
   /** Grade a question's open gaps with FSRS; mark mastered on correct. */
-  async gradeQuestion(agent, { questionId, verdict }) {
+  async gradeQuestion(agent, { questionId, verdict, courseTitle }) {
     const state = this.stateOf(agent)
-    if (state === null) throw new Error('no course loaded')
     const workspace = this.workspaceOf(agent)
-    const courseTitle = state.course.title ?? 'untitled'
+    const resolvedCourse = (courseTitle ?? state?.course?.title) ?? 'untitled'
     const ledger = await this.ledgerHandle()
-    const gaps = ledger.store.gapsForQuestion(workspace, courseTitle, questionId)
+    const gaps = ledger.store.gapsForQuestion(workspace, resolvedCourse, questionId)
     const now = nowMs()
     const rating = ratingForVerdict(verdict)
     const updated = []
@@ -1148,7 +1151,7 @@ export async function apply(ctx) {
   ctx.tools.register(defineTool({
     name: 'note_gap',
     description:
-      'Use only in teacher mode. Record a knowledge gap detected in the user\'s answer (wrong / vague / missing / exposed). Include the user\'s verbatim quote. Never narrate that you are recording it.',
+      'Use only in teacher mode. Record a knowledge gap detected in the user\'s answer (wrong / vague / missing / exposed). Include the user\'s verbatim quote. Never narrate that you are recording it. When grading a quiz run, pass the run\'s courseTitle (from analyze_quiz) so the gap is filed under the right course.',
     parameters: {
       questionId: { type: 'string', required: true },
       topic: { type: 'string', required: true, description: 'The missing/weak concept, e.g. "TCP handshake failure modes".' },
@@ -1159,6 +1162,7 @@ export async function apply(ctx) {
         description: 'wrong: factual error; vague: imprecise; missing: no answer / "I don\'t know"; exposed: the answer was revealed because the user gave up.',
       },
       confidence: { type: 'number', description: 'User-stated confidence 1..5, when available.' },
+      courseTitle: { type: 'string', description: 'The course this question belongs to (pass the run\'s courseTitle from analyze_quiz when grading a quiz).' },
     },
     output: {
       schema: {
@@ -1197,7 +1201,7 @@ export async function apply(ctx) {
   ctx.tools.register(defineTool({
     name: 'grade_answer',
     description:
-      'Use only in teacher mode. Grade the user\'s answer to a question against its hidden answer key: verdict correct | partial | wrong | no-answer. Updates the FSRS schedule for every open gap of that question; correct marks them mastered.',
+      'Use only in teacher mode. Grade the user\'s answer to a question against its hidden answer key: verdict correct | partial | wrong | no-answer. Updates the FSRS schedule for every open gap of that question; correct marks them mastered. When grading a quiz run, pass the run\'s courseTitle (from analyze_quiz) so the gaps are filed under the right course — no course needs to be loaded.',
     parameters: {
       questionId: { type: 'string', required: true },
       userAnswer: { type: 'string', required: true, description: 'The user\'s answer (verbatim).' },
@@ -1205,6 +1209,7 @@ export async function apply(ctx) {
         type: 'string', required: true,
         enum: ['correct', 'partial', 'wrong', 'no-answer'],
       },
+      courseTitle: { type: 'string', description: 'The course this question belongs to (pass the run\'s courseTitle from analyze_quiz when grading a quiz).' },
     },
     output: {
       schema: {
@@ -1413,7 +1418,7 @@ export async function apply(ctx) {
   ctx.tools.register(defineTool({
     name: 'analyze_quiz',
     description:
-      'Use only in teacher mode. Analyze a finished quiz run submitted through the LLM-free quiz popup. Without "done": returns the run\'s questions (with hidden answer keys and hints), the user\'s answers, and the course title. Grade each answer against its answer key (correct | partial | wrong | no-answer), call grade_answer per question and note_gap for non-correct ones, then run the Socratic walk only on the misses. After the walk is complete, call analyze_quiz again with done: true to mark the run analyzed.',
+      'Use only in teacher mode. Analyze a finished quiz run submitted through the LLM-free quiz popup — no course needs to be loaded; the run carries everything. Without "done": returns the run\'s questions (with hidden answer keys and hints), the user\'s answers, and the course title. Grade each answer against its answer key (correct | partial | wrong | no-answer), call grade_answer per question and note_gap for non-correct ones, PASSING the returned courseTitle so gaps are filed under the right course, then run the Socratic walk only on the misses. After the walk is complete, call analyze_quiz again with done: true to mark the run analyzed.',
     parameters: {
       runId: { type: 'number', required: true, description: 'The quiz run id (from the user\'s "Quiz finished (run <id>)" message).' },
       done: { type: 'boolean', description: 'true marks the run analyzed after the walk is complete.' },

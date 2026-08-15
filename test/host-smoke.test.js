@@ -584,3 +584,31 @@ test('finishing a quiz auto-enters teacher mode and surfaces the pending run at 
   await preStep({ agent }, () => {})
   assert.equal(agent.session.events.length, before)
 })
+
+test('grade_answer and note_gap work without any loaded course when courseTitle is passed', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const grade = registrations.tools.find((t) => t.name === 'grade_answer')
+  const note = registrations.tools.find((t) => t.name === 'note_gap')
+
+  // Fresh session: teacher mode on, but NO course loaded at all.
+  const agent = { session: mockSession('/no-course-ws') }
+  agent.session.append('teacher/mode', { active: true, course: null })
+  assert.equal((await import('../index.js')).TeacherController && true, true)
+
+  // note_gap with courseTitle files the gap under that course (no "no course loaded").
+  const gap = await note.execute({
+    questionId: 'q1', topic: 'gravity', userQuote: 'no idea', kind: 'missing', courseTitle: 'Science',
+  }, { agent })
+  assert.equal(gap.ok, true)
+  assert.ok(gap.gapId)
+
+  // grade_answer with courseTitle resolves that gap.
+  const graded = await grade.execute({
+    questionId: 'q1', userAnswer: 'gravity', verdict: 'correct', courseTitle: 'Science',
+  }, { agent })
+  assert.equal(graded.correct, true)
+  assert.equal(graded.updated.length, 1)
+  assert.equal(graded.updated[0].status, 'mastered')
+})
