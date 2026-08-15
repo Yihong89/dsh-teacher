@@ -8,9 +8,10 @@
  * gitignored stub at node_modules/@deepseek-ai/dsh-tools so the bare import
  * resolves; defineTool is identity in the stub.
  */
-import { test, before } from 'node:test'
+import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -82,9 +83,14 @@ function mockCtx() {
 }
 
 let stubDir = null
+let smokeLedgerDir = null
 
 before(() => {
   stubDir = installToolStub()
+  // Redirect the durable ledger to a throwaway file so smoke tests never
+  // touch the real $DSH_HOME/state ledger.
+  smokeLedgerDir = mkdtempSync(join(tmpdir(), 'dsh-teacher-smoke-'))
+  process.env.DSH_TEACHER_LEDGER = join(smokeLedgerDir, 'ledger.db')
 })
 
 test('host plugin registers section, commands, tools, and the gap projection', async () => {
@@ -97,11 +103,11 @@ test('host plugin registers section, commands, tools, and the gap projection', a
 
   assert.deepEqual(
     registrations.commands.map((c) => c.name).sort(),
-    ['gaps', 'retest', 'teach'],
+    ['gaps', 'quiz', 'retest', 'summary', 'teach'],
   )
   assert.deepEqual(
     registrations.tools.map((t) => t.name).sort(),
-    ['grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'retest'],
+    ['grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'quiz', 'retest', 'summary'],
   )
   assert.ok(registrations.events['agent/pre-step'])
   assert.equal(registrations.projections.length, 1)
@@ -123,6 +129,16 @@ test('teacher:policy section is empty until mode is active, then renders policy'
   assert.ok(text.includes('教师模式'))
   assert.ok(text.includes('永不直接给出答案'))
   assert.ok(text.includes('知识缺口回退'))
+  assert.ok(text.includes('不要立即开始提问'))
+  assert.ok(text.includes('这道题还有什么疑问吗'))
+  assert.ok(text.includes('调用 summary 工具'))
+  assert.ok(!text.includes('快速测试模式'))
+
+  // quiz mode appends the quick-test block
+  agent.session.append('teacher/quiz', { active: true })
+  const quizText = section.text({ agent })
+  assert.ok(quizText.includes('快速测试模式'))
+  assert.ok(quizText.includes('quiz（done: true）'))
 })
 
 test('/teach <path> loads the sample course and enters teacher mode', async () => {
@@ -200,6 +216,65 @@ test('import_curriculum rejects a conversion with no questions', async () => {
   )
 })
 
+test('quiz: start returns the whole bank and flips quiz mode; done returns wrong questions', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const quiz = registrations.tools.find((t) => t.name === 'quiz')
+  const note = registrations.tools.find((t) => t.name === 'note_gap')
+
+  const agent = { session: mockSession() }
+  await imp.execute({
+    courseTitle: 'Deck',
+    markdown: '## Q1: A?\n<!-- answer: a -->\n## Q2: B?\n<!-- answer: b -->\n',
+  }, { agent })
+
+  const started = await quiz.execute({}, { agent })
+  assert.equal(started.mode, 'quiz')
+  assert.equal(started.questions.length, 2)
+  assert.ok(started.questions.every((q) => !('answer' in q)))
+  const quizEvent = agent.session.events.find((e) => e.type === 'teacher/quiz')
+  assert.ok(quizEvent && quizEvent.data.active === true)
+
+  // user missed Q2 during the quiz → the teacher records the gap
+  await note.execute({
+    questionId: 'q2', topic: 'concept b', userQuote: 'i guessed', kind: 'wrong', confidence: 2,
+  }, { agent })
+
+  const done = await quiz.execute({ done: true }, { agent })
+  assert.equal(done.mode, 'walk')
+  assert.equal(done.focus.length, 1)
+  assert.equal(done.focus[0].questionId, 'q2')
+  const off = agent.session.events.filter((e) => e.type === 'teacher/quiz').at(-1)
+  assert.equal(off.data.active, false)
+})
+
+test('summary: pulls the ledger for the end-of-session report', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const note = registrations.tools.find((t) => t.name === 'note_gap')
+  const summary = registrations.tools.find((t) => t.name === 'summary')
+
+  const agent = { session: mockSession() }
+  await imp.execute({ courseTitle: 'Summary Deck', markdown: '## Q1: A?\n<!-- answer: a -->\n' }, { agent })
+  await note.execute({
+    questionId: 'q1', topic: 'tcp handshake', userQuote: 'no idea', kind: 'missing', confidence: 1,
+  }, { agent })
+
+  const result = await summary.execute({}, { agent })
+  assert.equal(result.course, 'Summary Deck')
+  assert.equal(result.open, 1)
+  assert.equal(result.mastered, 0)
+  assert.equal(result.byKind.missing, 1)
+  assert.equal(result.gaps[0].topic, 'tcp handshake')
+  assert.equal(result.gaps[0].evidence, 'no idea')
+})
+
 test.after(() => {
   if (stubDir) rmSync(join(REPO_ROOT, 'node_modules'), { recursive: true, force: true })
+  if (smokeLedgerDir) rmSync(smokeLedgerDir, { recursive: true, force: true })
+  delete process.env.DSH_TEACHER_LEDGER
 })

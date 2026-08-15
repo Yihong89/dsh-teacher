@@ -77,18 +77,22 @@ title: Networking review
 
 | Command | What it does |
 |---|---|
-| `/teach questions.md` | Load the question set and enter teacher mode |
+| `/teach questions.md` | Load the question set and enter teacher mode (**does not start teaching** — say "start", "quiz me", or ask about a topic) |
 | `/teach on` / `/teach off` | Toggle teacher mode (mode is session state, survives resume) |
+| `/quiz` | Quick-test mode: quiz the whole bank first, then walk only the wrong questions |
 | `/gaps` | Show the gap ledger for this course |
 | `/retest` | Surface due gaps for an on-demand drill (FSRS-5 schedule) |
+| `/summary` | End-of-session knowledge-gap & misconception summary |
 
 ### Teacher behavior (model tools)
 
 - **`next_question`** — pulls one question at a time; the answer key never appears in tool output.
-- **`import_curriculum`** — loads any markdown question file: read the raw file, extract each question + correct answer, emit them in the standard format. Used when the automatic parser can't make sense of a file's format.
+- **`import_curriculum`** — loads any markdown question file: read the raw file, extract each question + correct answer, emit them in the standard format. Used when the automatic parser can't make sense of a file's format. Loading a course does **not** start teaching — the teacher waits for your go-ahead.
+- **`quiz`** — quick-test mode: returns the whole bank (no answers); after grading, `done: true` returns the wrong-question list so the walk focuses only on those.
 - **`note_gap`** — records a gap (`wrong | vague | missing | exposed`) with the user's verbatim words + the knowledge point you identified; persisted to the ledger and the session log.
 - **`grade_answer`** — grades against the hidden answer key; updates each open gap's FSRS schedule; `correct` marks gaps mastered.
 - **`retest`** — returns due gaps; drill them one at a time, then `grade_answer`.
+- **`summary`** — pulls the ledger for the end-of-session knowledge-point report.
 
 Per the policy section (injected only while teacher mode is active): hard Socratic
 mode — never reveal the answer, one micro-question at a time; **hints are generated

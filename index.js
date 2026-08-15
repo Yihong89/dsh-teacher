@@ -42,6 +42,8 @@ function nowMs() {
 }
 
 function ledgerFilePath() {
+  // Tests and embedded deployments can redirect the ledger (e.g. a temp file).
+  if (process.env.DSH_TEACHER_LEDGER) return process.env.DSH_TEACHER_LEDGER
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
   return join(home, 'state', 'dsh-teacher', 'ledger.db')
 }
@@ -149,6 +151,75 @@ class TeacherController {
       this.pendingIntents.delete(agent.session)
     } catch (error) {
       this.ctx.logger?.warn?.(`dsh-teacher: failed to flush teacher/mode: ${error}`)
+    }
+  }
+
+  /** Toggle quick-test mode (log-only `teacher/quiz` event). */
+  setQuiz(agent, active) {
+    try {
+      agent.session.append('teacher/quiz', { active })
+      return 'committed'
+    } catch (error) {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/quiz: ${error}`)
+      return 'queued'
+    }
+  }
+
+  /** Wrong questions so far in this course, from the durable gap ledger. */
+  async wrongQuestions(agent) {
+    const state = this.stateOf(agent)
+    if (state === null) throw new Error('no course loaded')
+    const workspace = this.workspaceOf(agent)
+    const courseTitle = state.course.title ?? 'untitled'
+    const ledger = await this.ledgerHandle()
+    const gaps = ledger.store.listGaps({ workspace, course: courseTitle })
+    const open = gaps.filter((g) => g.status === GAP_STATUS.open)
+    const byQuestion = new Map()
+    for (const gap of open) {
+      if (!byQuestion.has(gap.questionId)) byQuestion.set(gap.questionId, [])
+      byQuestion.get(gap.questionId).push({
+        id: gap.id,
+        topic: gap.topic,
+        kind: gap.kind,
+        evidence: gap.evidence,
+      })
+    }
+    return {
+      questionIds: [...byQuestion.keys()],
+      questions: [...byQuestion.entries()].map(([questionId, gaps]) => ({
+        questionId,
+        gaps,
+      })),
+      openCount: open.length,
+    }
+  }
+
+  /** Ledger summary for the end-of-session knowledge-point report. */
+  async summary(agent) {
+    const state = this.stateOf(agent)
+    if (state === null) throw new Error('no course loaded')
+    const workspace = this.workspaceOf(agent)
+    const courseTitle = state.course.title ?? 'untitled'
+    const ledger = await this.ledgerHandle()
+    const gaps = ledger.store.listGaps({ workspace, course: courseTitle })
+    const open = gaps.filter((g) => g.status === GAP_STATUS.open)
+    const mastered = gaps.filter((g) => g.status === GAP_STATUS.mastered)
+    const byKind = {}
+    for (const gap of open) byKind[gap.kind] = (byKind[gap.kind] ?? 0) + 1
+    return {
+      course: courseTitle,
+      total: gaps.length,
+      open: open.length,
+      mastered: mastered.length,
+      byKind,
+      gaps: open.map((g) => ({
+        id: g.id,
+        questionId: g.questionId,
+        topic: g.topic,
+        kind: g.kind,
+        evidence: g.evidence,
+        dueAt: g.dueAt,
+      })),
     }
   }
 
@@ -275,7 +346,10 @@ export async function apply(ctx) {
       const folded = foldTeacherState(context.agent.session.events)
       if (!folded.active) return ''
       const course = controller.courseOf(context.agent)
-      return buildPolicy({ course: course ?? { title: folded.course, questions: [] } })
+      return buildPolicy({
+        course: course ?? { title: folded.course, questions: [] },
+        quiz: folded.quiz,
+      })
     },
   })
 
@@ -337,7 +411,7 @@ export async function apply(ctx) {
           controller.set(agent, true)
           return {
             kind: 'success',
-            text: `Course loaded: ${course.title ?? 'untitled'} — ${course.questions.length} questions. Teacher mode on. First question: ${course.questions[0]?.id ?? '—'}.`,
+            text: `Course loaded: ${course.title ?? 'untitled'} — ${course.questions.length} questions. Teacher mode on. Say "start" to begin the Socratic walk, "quiz me" for a quick test over the whole bank, or ask about a specific topic.`,
           }
         } catch (error) {
           return {
@@ -409,6 +483,52 @@ export async function apply(ctx) {
         }
       },
     })
+
+    commandCtx.commands.register({
+      name: 'quiz',
+      description: 'Start a quick test over the whole question bank; the Socratic walk then focuses on the wrong questions',
+      input: { hint: '' },
+      handler: async ({ agent }) => {
+        const course = controller.courseOf(agent)
+        if (course === null) {
+          return { kind: 'success', text: 'No course loaded. Run /teach <path-to-questions.md> first.' }
+        }
+        controller.setQuiz(agent, true)
+        return {
+          kind: 'success',
+          text: `Quick test mode on — the teacher will quiz you over all ${course.questions.length} questions first, then walk only the ones you miss. Say "start" to begin the test.`,
+        }
+      },
+    })
+
+    commandCtx.commands.register({
+      name: 'summary',
+      description: 'Show the end-of-session knowledge-gap and misconception summary',
+      input: { hint: '' },
+      handler: async ({ agent }) => {
+        const course = controller.courseOf(agent)
+        if (course === null) {
+          return { kind: 'success', text: 'No course loaded. Run /teach <path-to-questions.md> first.' }
+        }
+        const summary = await controller.summary(agent)
+        if (summary.total === 0) {
+          return { kind: 'success', text: 'No gaps recorded yet — nothing to summarize.' }
+        }
+        const kindLabel = { wrong: '错误', vague: '含糊', missing: '未答', exposed: '已提示' }
+        const lines = [
+          `知识缺口总结 — 《${summary.course}》`,
+          `缺口 ${summary.open} 个（已掌握 ${summary.mastered} 个）`,
+          summary.open > 0
+            ? `按类型：${Object.entries(summary.byKind).map(([k, n]) => `${kindLabel[k] ?? k} ${n}`).join(' · ')}`
+            : '全部掌握，暂无缺口。',
+          '',
+          ...summary.gaps.map((g) => `- [${kindLabel[g.kind] ?? g.kind}] ${g.topic} (${g.questionId}) — "${g.evidence.slice(0, 80)}"`),
+          '',
+          '老师可用 summary 工具生成完整报告。',
+        ]
+        return { kind: 'success', text: lines.join('\n') }
+      },
+    })
   })
 
   // ---- model-facing tools (always registered; gated on teacher mode) --------
@@ -466,7 +586,7 @@ export async function apply(ctx) {
   ctx.tools.register(defineTool({
     name: 'import_curriculum',
     description:
-      'Load a course from a markdown question file in any format. Read the raw file with the read tool first, then extract EVERY question with its prompt and its correct answer — from markers like "→ **Answer:**", "Answer:", "答案：", ✅/bold multiple-choice options, or from your own knowledge (omit the answer if you are not confident; never invent one). Emit the questions in the standard format and pass them as the markdown argument: one "## Q1: <prompt>" heading per question, the answer as "<!-- answer: ... -->", and optional choices as "<!-- options: A. x | B. y | C. z | D. w -->". Preserve the original numbering. This replaces the currently loaded course and turns teacher mode on.',
+      'Load a course from a markdown question file in any format. Read the raw file with the read tool first, then extract EVERY question with its prompt and its correct answer — from markers like "→ **Answer:**", "Answer:", "答案：", ✅/bold multiple-choice options, or from your own knowledge (omit the answer if you are not confident; never invent one). Emit the questions in the standard format and pass them as the markdown argument: one "## Q1: <prompt>" heading per question, the answer as "<!-- answer: ... -->", and optional choices as "<!-- options: A. x | B. y | C. z | D. w -->". Preserve the original numbering. This replaces the currently loaded course and turns teacher mode on, but does NOT start teaching: introduce the course briefly and wait for the user to ask (e.g. "start" or "quiz me").',
     parameters: {
       courseTitle: { type: 'string', required: true, description: 'Short course title, e.g. "English Wrong Answers".' },
       markdown: { type: 'string', required: true, description: 'The converted questions in standard format.' },
@@ -485,7 +605,7 @@ export async function apply(ctx) {
         },
       },
       render: (_args, result) => [
-        { type: 'text', text: `Course imported: ${result.title} — ${result.questionCount} questions. Teacher mode on.` },
+        { type: 'text', text: `Course imported: ${result.title} — ${result.questionCount} questions. Say "start" to begin, or "quiz me" for a quick test.` },
       ],
     },
     execute: async (args, exec) => {
@@ -524,7 +644,7 @@ export async function apply(ctx) {
       return {
         card: 'generic',
         title: 'Course imported',
-        content: `${v.title} — ${v.questionCount} questions. Teacher mode on.`,
+        content: `${v.title} — ${v.questionCount} questions. Say "start" to begin, or "quiz me" for a quick test.`,
       }
     },
   }))
@@ -694,6 +814,152 @@ export async function apply(ctx) {
         content: v.due.length
           ? `${v.due.length} gap(s) due — drill them one at a time.`
           : 'Nothing due right now.',
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'quiz',
+    description:
+      'Use only in teacher mode. Quick-test mode over the whole question bank. Without "done": turns quiz mode on and returns EVERY question (id, prompt, options, section — never the answers) so you can ask them all quickly. After the test, grade each with grade_answer and note_gap the non-correct ones. Then call quiz with done: true: it ends quiz mode and returns the wrong questions (from the recorded gaps) so the Socratic walk focuses only on those.',
+    parameters: {
+      done: { type: 'boolean', description: 'true ends quiz mode and returns the wrong-question focus list.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          mode: { type: 'string', required: true },
+          questions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string' },
+                prompt: { type: 'string' },
+                options: { type: 'array', items: { type: 'string' } },
+                section: { type: 'string' },
+              },
+            },
+          },
+          focus: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                questionId: { type: 'string' },
+                gaps: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string' },
+                      topic: { type: 'string' },
+                      kind: { type: 'string' },
+                      evidence: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        required: ['mode'],
+      },
+      render: (_args, result) => [
+        { type: 'text', text: result.mode === 'quiz'
+          ? `Quiz mode on — ${result.questions.length} questions.`
+          : `Quiz done — ${result.focus.length} question(s) to walk: ${result.focus.map((f) => f.questionId).join(', ') || 'none'}.` },
+      ],
+    },
+    execute: async (args, exec) => {
+      const agent = exec.agent
+      if (agent === undefined) throw new Error('quiz requires a calling agent')
+      requireTeacherMode(agent)
+      const course = controller.courseOf(agent)
+      if (course === null) throw new Error('no course loaded (run /teach <path.md>)')
+      if (args.done) {
+        controller.setQuiz(agent, false)
+        const wrong = await controller.wrongQuestions(agent)
+        return { mode: 'walk', focus: wrong.questions, questions: [] }
+      }
+      controller.setQuiz(agent, true)
+      return {
+        mode: 'quiz',
+        questions: publicQuestions(course),
+        focus: [],
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Quiz', kind: 'other' }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      const v = result.value
+      return {
+        card: 'generic',
+        title: v.mode === 'quiz' ? 'Quiz mode on' : 'Quiz done',
+        content: v.mode === 'quiz'
+          ? `${v.questions.length} questions — ask them all, then call quiz with done: true.`
+          : `${v.focus.length} wrong question(s) to walk: ${v.focus.map((f) => f.questionId).join(', ') || 'none'}.`,
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'summary',
+    description:
+      'Use only in teacher mode. Pull the gap ledger for the current course and produce the end-of-session knowledge-point summary: open gaps (topic, kind, the user\'s own words), counts by kind, and mastered count. Call this when the lesson ends or the user asks for a summary.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          course: { type: 'string', required: true },
+          total: { type: 'number', required: true },
+          open: { type: 'number', required: true },
+          mastered: { type: 'number', required: true },
+          byKind: { type: 'object', additionalProperties: false, properties: { wrong: { type: 'number' }, vague: { type: 'number' }, missing: { type: 'number' }, exposed: { type: 'number' } } },
+          gaps: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string' },
+                questionId: { type: 'string' },
+                topic: { type: 'string' },
+                kind: { type: 'string' },
+                evidence: { type: 'string' },
+                dueAt: { type: 'number' },
+              },
+            },
+            required: true,
+          },
+        },
+        required: ['course', 'total', 'open', 'mastered', 'gaps'],
+      },
+      render: (_args, result) => [
+        { type: 'text', text: `Summary: ${result.open} open gaps, ${result.mastered} mastered (of ${result.total}).` },
+      ],
+    },
+    execute: async (args, exec) => {
+      const agent = exec.agent
+      if (agent === undefined) throw new Error('summary requires a calling agent')
+      requireTeacherMode(agent)
+      return controller.summary(agent)
+    },
+    presentCall: () => ({ card: 'generic', title: 'Summary', kind: 'other' }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      const v = result.value
+      return {
+        card: 'generic',
+        title: 'Gap summary',
+        content: `${v.open} open gaps, ${v.mastered} mastered (${v.total} total). ${v.gaps.length} gap(s) to review.`,
       }
     },
   }))
