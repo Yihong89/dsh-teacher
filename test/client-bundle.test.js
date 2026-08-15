@@ -49,7 +49,7 @@ function mockSlots() {
 test('client bundle exports a slots plugin', () => {
   const { moduleObj } = loadBundle()
   assert.equal(moduleObj.name, 'dsh-teacher/client')
-  assert.deepEqual(moduleObj.inject, ['slots'])
+  assert.deepEqual(moduleObj.inject, ['slots', 'conversation'])
   assert.equal(typeof moduleObj.apply, 'function')
 })
 
@@ -140,3 +140,22 @@ function collectTexts(node, out = []) {
   }
   return out
 }
+
+test('next_question inject exposes a send that submits the clicked option', () => {
+  const { moduleObj } = loadBundle()
+  const { slots, entries } = mockSlots()
+  const sent = []
+  const ctx = {
+    get: (name) => (name === 'slots' ? slots : undefined),
+    conversation: { send: (t) => { sent.push(t); return Promise.resolve() } },
+  }
+  moduleObj.apply(ctx)
+  const nq = entries.find((e) => e.slot === 'tool.call.toolview' && e.register().opts.key === 'next_question')
+  assert.ok(nq, 'next_question toolview registered')
+  const inject = nq.register().opts.inject
+  assert.equal(typeof inject, 'function')
+  const props = inject()
+  assert.equal(typeof props.send, 'function')
+  props.send('Option A')
+  assert.deepEqual(sent, ['Option A'])
+})

@@ -594,6 +594,7 @@ export async function apply(ctx) {
         card: 'generic',
         title: `Question ${v.id}`,
         content: `${v.prompt}\n\n(${v.total} questions in this course)`,
+        options: v.options,
       }
     },
   }))
