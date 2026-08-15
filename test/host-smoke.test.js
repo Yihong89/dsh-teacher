@@ -40,6 +40,18 @@ function installToolStub() {
     join(zodDir, 'index.js'),
     'export const z = { object: (s) => ({ _shape: s }), array: (x) => x, any: () => "any" }\n',
   )
+  // @deepseek-ai/dsh-session stub — index.js and lib/register-events.js
+  // register their session event types into the shared catalog Set.
+  const sessionDir = join(REPO_ROOT, 'node_modules', '@deepseek-ai', 'dsh-session')
+  mkdirSync(sessionDir, { recursive: true })
+  writeFileSync(
+    join(sessionDir, 'package.json'),
+    JSON.stringify({ name: '@deepseek-ai/dsh-session', type: 'module', main: 'index.js' }),
+  )
+  writeFileSync(
+    join(sessionDir, 'index.js'),
+    'export const KNOWN_SESSION_EVENT_TYPES = new Set()\n',
+  )
   return dir
 }
 
@@ -228,6 +240,19 @@ test('import_curriculum rejects a conversion with no questions', async () => {
     () => imp.execute({ courseTitle: 'Empty', markdown: '# Just prose\nno questions here' }, { agent }),
     /no questions found/,
   )
+})
+
+test('event types are registered with the harness persistence catalog', async () => {
+  const { KNOWN_SESSION_EVENT_TYPES } = await import('@deepseek-ai/dsh-session')
+  // index.js registers at module load
+  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz']) {
+    assert.ok(KNOWN_SESSION_EVENT_TYPES.has(type), `expected ${type} registered`)
+  }
+  // the profile-boot registrar (dsh-teacher/register-events) registers too
+  const registrar = await import('../lib/register-events.js')
+  assert.equal(registrar.name, 'dsh-teacher/register-events')
+  registrar.apply()
+  assert.ok(KNOWN_SESSION_EVENT_TYPES.has('teacher/mode'))
 })
 
 test('quiz: start returns the whole bank and flips quiz mode; done returns wrong questions', async () => {

@@ -9,6 +9,9 @@
     "./client": {
       "default": "./lib/client.js"
     },
+    "./register-events": {
+      "default": "./lib/register-events.js"
+    },
     "./package.json": "./package.json"
   },
   "license": "MIT",

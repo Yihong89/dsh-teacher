@@ -19,16 +19,31 @@ import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 
 import { parseCurriculum, publicQuestions } from './lib/curriculum.js'
 import { buildPolicy } from './lib/policy.js'
 import { LedgerStore, gapId, GAP_STATUS } from './lib/ledger.js'
-import { foldTeacherState, hasOpenTurn } from './lib/fold.js'
+import { foldTeacherState, hasOpenTurn, MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT } from './lib/fold.js'
 import { gapProjectionWith } from './lib/gap-projection.js'
 import {
   buildGap, gapKindForVerdict, isCorrect, ratingForVerdict, verdictLabel,
 } from './lib/grading.js'
 import { FSRS, createCard, review } from './lib/fsrs.js'
+
+/**
+ * Register dsh-teacher's session event types with the harness persistence
+ * catalog. `KNOWN_SESSION_EVENT_TYPES` is a generated Set shared by the
+ * persistence read path: a log containing an event type outside it is refused
+ * ("unknown to this harness and not marked ignorable") unless the event is
+ * marked ignorable, which `session.append` cannot do. Registering at module
+ * load makes teacher sessions readable again after restart — for the very
+ * first read of a process, the profile-boot registrar (`dsh-teacher/
+ * register-events`) runs first (see lib/register-events.js).
+ */
+for (const type of [MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT]) {
+  KNOWN_SESSION_EVENT_TYPES.add(type)
+}
 
 export const name = 'dsh-teacher'
 
