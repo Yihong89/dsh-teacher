@@ -15,13 +15,15 @@
  * @module dsh-teacher
  */
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 
 import { parseCurriculum, publicQuestions } from './lib/curriculum.js'
+import { loadCourse, saveCourse } from './lib/course-store.js'
 import { buildPolicy } from './lib/policy.js'
 import { LedgerStore, gapId, GAP_STATUS } from './lib/ledger.js'
 import { foldTeacherState, hasOpenTurn, MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT } from './lib/fold.js'
@@ -111,7 +113,29 @@ class TeacherController {
   }
 
   courseOf(agent) {
-    return this.stateOf(agent)?.course ?? null
+    const cached = this.stateOf(agent)?.course ?? null
+    if (cached !== null) return cached
+    // Fresh process: reload the persisted course for this workspace so the
+    // loaded question bank survives a server restart.
+    try {
+      const course = loadCourse(this.workspaceOf(agent))
+      if (course !== null) {
+        this.sessions.set(this.sessionKey(agent), { course, coursePath: 'persisted' })
+        return course
+      }
+    } catch {
+      // Unreadable/corrupt course file is treated as no course.
+    }
+    return null
+  }
+
+  /** Persist the loaded course to disk so it survives restarts. */
+  persistCourse(agent, course) {
+    try {
+      saveCourse(this.workspaceOf(agent), course)
+    } catch (error) {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to persist course: ${error}`)
+    }
   }
 
   /** Workspace key used to scope the durable ledger. */
@@ -253,6 +277,7 @@ class TeacherController {
   async loadCourse(agent, path) {
     const course = await readCourse(this.ctx, path)
     this.sessions.set(this.sessionKey(agent), { course, coursePath: path })
+    this.persistCourse(agent, course, path)
     return course
   }
 
@@ -654,6 +679,7 @@ export async function apply(ctx) {
         course,
         coursePath: args.sourcePath ?? 'llm-import',
       })
+      controller.persistCourse(agent, course, args.sourcePath ?? 'llm-import')
       controller.set(agent, true)
       const first = course.questions[0]
       return {
@@ -997,3 +1023,5 @@ export async function apply(ctx) {
     },
   }))
 }
+
+export { TeacherController }

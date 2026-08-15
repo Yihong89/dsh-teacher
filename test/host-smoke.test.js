@@ -55,10 +55,10 @@ function installToolStub() {
   return dir
 }
 
-function mockSession() {
+function mockSession(cwd = '/tmp') {
   const session = {
     id: 's1',
-    meta: { cwd: '/tmp' },
+    meta: { cwd },
     events: [],
     append(type, data) {
       this.events.push({ type, data })
@@ -96,13 +96,16 @@ function mockCtx() {
 
 let stubDir = null
 let smokeLedgerDir = null
+let smokeHomeDir = null
 
 before(() => {
   stubDir = installToolStub()
-  // Redirect the durable ledger to a throwaway file so smoke tests never
-  // touch the real $DSH_HOME/state ledger.
+  // Redirect the durable ledger AND the course store to throwaway locations
+  // so smoke tests never touch the real $DSH_HOME/state.
   smokeLedgerDir = mkdtempSync(join(tmpdir(), 'dsh-teacher-smoke-'))
   process.env.DSH_TEACHER_LEDGER = join(smokeLedgerDir, 'ledger.db')
+  smokeHomeDir = mkdtempSync(join(tmpdir(), 'dsh-teacher-home-'))
+  process.env.DSH_HOME = smokeHomeDir
 })
 
 test('host plugin registers section, commands, tools, and the gap projection', async () => {
@@ -192,7 +195,8 @@ test('/teach off and empty state reporting', async () => {
   await apply(ctx)
   const teach = registrations.commands.find((c) => c.name === 'teach')
 
-  const agent = { session: mockSession() }
+  // Unique workspace so no persisted course leaks in from earlier tests.
+  const agent = { session: mockSession('/empty-workspace-no-course') }
   const status = await teach.handler({ agent, rawInput: '' })
   assert.ok(status.text.includes('Teacher mode is off'))
 
@@ -315,5 +319,7 @@ test('summary: pulls the ledger for the end-of-session report', async () => {
 test.after(() => {
   if (stubDir) rmSync(join(REPO_ROOT, 'node_modules'), { recursive: true, force: true })
   if (smokeLedgerDir) rmSync(smokeLedgerDir, { recursive: true, force: true })
+  if (smokeHomeDir) rmSync(smokeHomeDir, { recursive: true, force: true })
   delete process.env.DSH_TEACHER_LEDGER
+  delete process.env.DSH_HOME
 })
