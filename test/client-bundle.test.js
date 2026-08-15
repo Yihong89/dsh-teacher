@@ -64,12 +64,20 @@ test('apply registers five toolviews, a header button, and an overlay panel', ()
     ['grade_answer', 'next_question', 'note_gap', 'retest'],
   )
 
-  const button = entries.find((e) => e.slot === 'conversation.session.header.actions')
-  assert.ok(button)
-  const btnOpts = button.register().opts
-  assert.equal(btnOpts.name, 'conversation.session.header.actions')
-  assert.equal(btnOpts.id, 'dsh-teacher-gaps')
-  assert.equal(typeof btnOpts.label, 'function')
+  // Teacher controls live inside the chat box: quiz leading, gaps trailing.
+  const quizBtn = entries.find((e) => e.slot === 'conversation.input.left')
+  assert.ok(quizBtn)
+  const quizOpts = quizBtn.register().opts
+  assert.equal(quizOpts.name, 'conversation.input.left')
+  assert.equal(quizOpts.id, 'dsh-teacher-quiz')
+  assert.equal(typeof quizOpts.label, 'function')
+
+  const gapsBtn = entries.find((e) => e.slot === 'conversation.input.right')
+  assert.ok(gapsBtn)
+  const gapsOpts = gapsBtn.register().opts
+  assert.equal(gapsOpts.name, 'conversation.input.right')
+  assert.equal(gapsOpts.id, 'dsh-teacher-gaps')
+  assert.equal(typeof gapsOpts.label, 'function')
 
   const overlay = entries.find((e) => e.slot === 'shell.overlay')
   assert.ok(overlay)
@@ -106,10 +114,12 @@ test('gaps button shows a due badge from the teacherGaps projection', () => {
   const { slots, entries } = mockSlots()
   moduleObj.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
 
-  const button = entries.find((e) => e.slot === 'conversation.session.header.actions')
+  const button = entries.find((e) => e.slot === 'conversation.input.right')
   const { component: GapsButton } = button.register()
   const now = Date.now()
   const tree = GapsButton({
+    sessionId: 's1',
+    useSessions: (selector) => selector({ byId: { s1: { agentPreset: 'teacher' } } }),
     useProjection: () => ({
       gaps: [
         { id: 'g1', topic: 'tcp', kind: 'wrong', status: 'open', dueAt: now - 1000 },
