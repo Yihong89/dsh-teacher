@@ -905,11 +905,15 @@ export async function apply(ctx) {
         return { mode: 'walk', focus: wrong.questions, questions: [] }
       }
       controller.setQuiz(agent, true)
-      return {
-        mode: 'quiz',
-        questions: publicQuestions(course),
-        focus: [],
-      }
+      // Map to the output schema exactly (additionalProperties: false): keep
+      // only id/prompt/options/section, omit absent keys (lossless JSON).
+      const questions = publicQuestions(course).map((q) => ({
+        id: q.id,
+        prompt: q.prompt,
+        ...(Array.isArray(q.options) && q.options.length > 0 ? { options: q.options } : {}),
+        ...(q.section ? { section: q.section } : {}),
+      }))
+      return { mode: 'quiz', questions, focus: [] }
     },
     presentCall: () => ({ card: 'generic', title: 'Quiz', kind: 'other' }),
     presentResult: (_args, result) => {
