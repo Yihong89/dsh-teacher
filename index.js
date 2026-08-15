@@ -84,10 +84,19 @@ async function readCourse(ctx, path) {
 class TeacherController {
   constructor(ctx) {
     this.ctx = ctx
-    this.sessions = new WeakMap() // Session -> { course, coursePath }
-    this.pendingIntents = new WeakMap() // Session -> { active, narrate }
+    // Keyed by the stable session id (a string), not the Session object: the
+    // harness may hand out a fresh Agent/Session reference across turns, which
+    // made a WeakMap keyed by `agent.session` lose state (intermittent
+    // "no course loaded"). Entries are bounded by session count.
+    this.sessions = new Map() // sessionId -> { course, coursePath }
+    this.pendingIntents = new Map() // sessionId -> { active, narrate }
     this.ledger = null
     this.fsrs = new FSRS()
+  }
+
+  /** Stable per-session state key: the session id (a string). */
+  sessionKey(agent) {
+    return agent.session.id
   }
 
   async ledgerHandle() {
@@ -98,7 +107,7 @@ class TeacherController {
   }
 
   stateOf(agent) {
-    return this.sessions.get(agent.session) ?? null
+    return this.sessions.get(this.sessionKey(agent)) ?? null
   }
 
   courseOf(agent) {
@@ -112,7 +121,7 @@ class TeacherController {
 
   get(agent) {
     const active = foldTeacherState(agent.session.events).active
-    const pending = this.pendingIntents.get(agent.session)
+    const pending = this.pendingIntents.get(this.sessionKey(agent))
     return pending === undefined ? { active } : { active, pending: pending.active }
   }
 
@@ -123,15 +132,16 @@ class TeacherController {
    */
   set(agent, active) {
     const session = agent.session
-    const pending = this.pendingIntents.get(session)
+    const key = this.sessionKey(agent)
+    const pending = this.pendingIntents.get(key)
     const target = pending?.active ?? foldTeacherState(session.events).active
     if (active === target) return 'noop'
     if (hasOpenTurn(session.events)) {
-      this.pendingIntents.set(session, { active })
+      this.pendingIntents.set(key, { active })
       return foldTeacherState(session.events).active === active ? 'cancelled' : 'queued'
     }
     if (active === foldTeacherState(session.events).active) {
-      this.pendingIntents.delete(session)
+      this.pendingIntents.delete(key)
       return 'cancelled'
     }
     try {
@@ -140,21 +150,22 @@ class TeacherController {
         active,
         course: state?.course?.title ?? null,
       })
-      this.pendingIntents.delete(session)
+      this.pendingIntents.delete(key)
       return 'committed'
     } catch (error) {
       this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/mode: ${error}`)
-      this.pendingIntents.set(session, { active })
+      this.pendingIntents.set(key, { active })
       return 'queued'
     }
   }
 
   /** Apply one pending selection before the next request assembly. */
   flushPending(agent) {
-    const pending = this.pendingIntents.get(agent.session)
+    const key = this.sessionKey(agent)
+    const pending = this.pendingIntents.get(key)
     if (pending === undefined) return
     if (pending.active === foldTeacherState(agent.session.events).active) {
-      this.pendingIntents.delete(agent.session)
+      this.pendingIntents.delete(key)
       return
     }
     try {
@@ -163,7 +174,7 @@ class TeacherController {
         active: pending.active,
         course: state?.course?.title ?? null,
       })
-      this.pendingIntents.delete(agent.session)
+      this.pendingIntents.delete(key)
     } catch (error) {
       this.ctx.logger?.warn?.(`dsh-teacher: failed to flush teacher/mode: ${error}`)
     }
@@ -241,7 +252,7 @@ class TeacherController {
   /** Load a course into the session state and return it. */
   async loadCourse(agent, path) {
     const course = await readCourse(this.ctx, path)
-    this.sessions.set(agent.session, { course, coursePath: path })
+    this.sessions.set(this.sessionKey(agent), { course, coursePath: path })
     return course
   }
 
@@ -639,7 +650,7 @@ export async function apply(ctx) {
         }
       }
       course.title = args.courseTitle || course.title || 'Imported course'
-      controller.sessions.set(agent.session, {
+      controller.sessions.set(controller.sessionKey(agent), {
         course,
         coursePath: args.sourcePath ?? 'llm-import',
       })
