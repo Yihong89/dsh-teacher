@@ -7,31 +7,51 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+const req = createRequire(import.meta.url)
 
-function loadBundle() {
-  const source = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+function evalBundle(source) {
   let captured = null
-  const reactStub = {
-    createElement: (type, props, ...children) => ({ type, props, children }),
-    useState: (init) => [init, () => {}],
-    useEffect: (fn) => { fn() }, // run the effect body; ignore the disposer
-  }
   globalThis.window = {
     __ModuleLoader__: {
       load: (def) => { captured = def },
     },
   }
-  // The bundle is a classic script referencing window at the top level.
   // eslint-disable-next-line no-eval
   ;(0, eval)(source)
-  assert.ok(captured, 'bundle did not call __ModuleLoader__.load')
-  const moduleObj = captured.factory((spec) => {
+  if (captured === null) throw new Error('bundle did not call __ModuleLoader__.load')
+  return captured
+}
+
+function loadCore() {
+  const pkgPath = req.resolve('dsh-voice-core/package.json')
+  const source = readFileSync(join(dirname(pkgPath), 'lib', 'client.js'), 'utf8')
+  return evalBundle(source)
+}
+
+function loadBundle() {
+  const coreDef = loadCore()
+  const source = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  const def = evalBundle(source)
+  const reactStub = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useState: (init) => [init, () => {}],
+    useEffect: (fn) => { fn() }, // run the effect body; ignore the disposer
+    useRef: (init) => ({ current: init }),
+  }
+  const coreModule = coreDef.factory((spec) => {
     if (spec === 'react') return reactStub
     if (spec === 'react/jsx-runtime') return reactStub
+    throw new Error(`unexpected core require: ${spec}`)
+  })
+  const moduleObj = def.factory((spec) => {
+    if (spec === 'react') return reactStub
+    if (spec === 'react/jsx-runtime') return reactStub
+    if (spec === 'dsh-voice-core') return coreModule
     throw new Error(`unexpected require: ${spec}`)
   })
   return { moduleObj, reactStub }
@@ -79,10 +99,10 @@ test('apply registers five toolviews, a header button, and an overlay panel', ()
   assert.equal(gapsOpts.id, 'dsh-teacher-gaps')
   assert.equal(typeof gapsOpts.label, 'function')
 
-  const speakBtn = entries.find((e) => e.slot === 'conversation.input.right' && e.register().opts.id === 'dsh-teacher-speak')
-  assert.ok(speakBtn, 'TTS speak toggle registered in the chat box')
+  const speakBtn = entries.find((e) => e.slot === 'conversation.input.right' && e.register().opts.id === 'dsh-voice-teacher-speak')
+  assert.ok(speakBtn, 'TTS speak toggle registered in the chat box (via dsh-voice-core)')
 
-  const overlay = entries.find((e) => e.slot === 'shell.overlay')
+  const overlay = entries.find((e) => e.slot === 'shell.overlay' && e.register().opts.id === 'dsh-teacher-gaps-panel')
   assert.ok(overlay)
   assert.equal(overlay.register().opts.id, 'dsh-teacher-gaps-panel')
 })
@@ -246,7 +266,7 @@ test('latestAssistantText skips running steps and returns null when no assistant
 test('speak cursor key is per-session and survives reloads (no re-reading old messages)', () => {
   const { moduleObj } = loadBundle()
   const { SPEAK_CURSOR_KEY } = moduleObj._test
-  assert.equal(SPEAK_CURSOR_KEY, 'dsh-teacher.spoken-cursor')
+  assert.equal(SPEAK_CURSOR_KEY, 'dsh-voice.spoken-cursor.teacher')
   // Simulate the cursor semantics used by SpeakToggle: stored per sessionId,
   // and a message whose seq <= cursor.seq for the same session is not spoken.
   const store = new Map()

@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -126,23 +126,28 @@ test('host plugin registers section, commands, tools, and the gap projection', a
 
   assert.deepEqual(
     registrations.commands.map((c) => c.name).sort(),
-    ['course', 'gaps', 'quiz', 'retest', 'speak', 'summary', 'teach'],
+    ['cheer', 'cheer-at', 'cheer-text', 'course', 'gaps', 'quiz', 'retest', 'speak', 'summary', 'teach', 'voice'],
   )
   assert.deepEqual(
     registrations.tools.map((t) => t.name).sort(),
-    ['analyze_quiz', 'grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'quiz', 'retest', 'speak', 'summary'],
+    ['analyze_quiz', 'cheer', 'grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'quiz', 'retest', 'speak', 'summary'],
   )
   assert.ok(registrations.events['agent/pre-step'])
   assert.deepEqual(
     registrations.projections.map((p) => p.key).sort(),
-    ['teacherGaps', 'teacherQuiz'],
+    ['teacherGaps', 'teacherQuiz', 'voiceSpeak'],
   )
   assert.ok(registrations.projections.every((p) => p.stateVersion === 1))
 
   // Regression guard: the dsh-tools value-schema DSL rejects a root-level
   // "required: [...]" array at mount (requiredness must be per-property).
   // This exact bug broke the teacher preset twice; keep it pinned.
+  // speak/cheer come from dsh-voice-core, whose schemas pass through the real
+  // defineTool (normalized to a root required array — harness-correct), so
+  // only teacher-authored tools are checked.
+  const coreTools = new Set(['speak', 'cheer'])
   for (const tool of registrations.tools) {
+    if (coreTools.has(tool.name)) continue
     assert.ok(
       !Object.hasOwn(tool.output.schema, 'required'),
       `tool "${tool.name}" output.schema must not declare a root-level "required" array`,
@@ -260,9 +265,12 @@ test('import_curriculum rejects a conversion with no questions', async () => {
 })
 
 test('event types are registered with the harness persistence catalog', async () => {
+  // Teacher events register into the repo-root dsh-session stub; voice/*
+  // events register into dsh-voice-core's own dsh-session copy (pnpm
+  // isolation) — check each against the instance its plugin resolved.
+  await import('../index.js')
   const { KNOWN_SESSION_EVENT_TYPES } = await import('@deepseek-ai/dsh-session')
-  // index.js registers at module load
-  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz', 'teacher/course', 'teacher/quiz-run', 'teacher/speak', 'teacher/spoken']) {
+  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz', 'teacher/course', 'teacher/quiz-run']) {
     assert.ok(KNOWN_SESSION_EVENT_TYPES.has(type), `expected ${type} registered`)
   }
   // the profile-boot registrar (dsh-teacher/register-events) registers too
@@ -272,6 +280,18 @@ test('event types are registered with the harness persistence catalog', async ()
   assert.ok(KNOWN_SESSION_EVENT_TYPES.has('teacher/mode'))
   assert.ok(KNOWN_SESSION_EVENT_TYPES.has('teacher/course'))
   assert.ok(KNOWN_SESSION_EVENT_TYPES.has('teacher/quiz-run'))
+
+  // voice/* events come from dsh-voice-core. Under pnpm the core resolves the
+  // REAL @deepseek-ai/dsh-session peer (not the repo-root stub the teacher
+  // tests use), so read that same instance core registers into.
+  const { createRequire } = await import('node:module')
+  const req = createRequire(import.meta.url)
+  const corePkg = req.resolve('dsh-voice-core/package.json')
+  const coreSessionPath = createRequire(corePkg).resolve('@deepseek-ai/dsh-session')
+  const coreSet = (await import(pathToFileURL(coreSessionPath).href)).KNOWN_SESSION_EVENT_TYPES
+  for (const type of ['voice/speak', 'voice/spoken', 'voice/cheer']) {
+    assert.ok(coreSet.has(type), `expected ${type} registered (voice core)`)
+  }
 })
 
 test('quiz: start returns the whole bank and flips quiz mode; done returns wrong questions', async () => {
@@ -332,7 +352,7 @@ test('summary: pulls the ledger for the end-of-session report', async () => {
 })
 
 test.after(() => {
-  if (stubDir) rmSync(join(REPO_ROOT, 'node_modules'), { recursive: true, force: true })
+  if (stubDir) rmSync(stubDir, { recursive: true, force: true })
   if (smokeLedgerDir) rmSync(smokeLedgerDir, { recursive: true, force: true })
   if (smokeHomeDir) rmSync(smokeHomeDir, { recursive: true, force: true })
   delete process.env.DSH_TEACHER_LEDGER
@@ -468,7 +488,7 @@ test('a fresh session is hydrated from the store at pre-step (no re-import)', as
   const { ctx, registrations } = mockCtx()
   await apply(ctx)
   const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
-  const preStep = registrations.events['agent/pre-step'][0]
+  const preStep = registrations.events['agent/pre-step'].at(-1)
   assert.ok(registrations.events['agent/session-start'], 'agent/session-start listener registered')
 
   // Load a course into the store under a directory workspace.
@@ -497,7 +517,7 @@ test('hydration falls back to the latest directory-keyed course for cwd-less ses
   const { ctx, registrations } = mockCtx()
   await apply(ctx)
   const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
-  const preStep = registrations.events['agent/pre-step'][0]
+  const preStep = registrations.events['agent/pre-step'].at(-1)
 
   const loader = { session: mockSession('/dir-ws') }
   await imp.execute({ courseTitle: 'DirCourse', markdown: '## Q1: A?\n<!-- answer: a -->\n' }, { agent: loader })
@@ -552,7 +572,7 @@ test('finishing a quiz auto-enters teacher mode and surfaces the pending run at 
   const { ctx, registrations } = mockCtx({ webServer: true })
   await apply(ctx)
   const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
-  const preStep = registrations.events['agent/pre-step'][0]
+  const preStep = registrations.events['agent/pre-step'].at(-1)
   const route = registrations.webRoutes.find((r) => r.path === '/dsh-teacher/quiz/submit')
 
   const agent = { session: mockSession('/auto-mode-ws') }
@@ -638,20 +658,19 @@ test('the shared course pool is global — importing the same title from any ses
   assert.equal(english[0].workspace, 'global')
 })
 
-test('speak tool records a teacher/spoken event for the browser to play', async () => {
+test('speak tool records a voice/spoken event for the browser to play', async () => {
   const { apply } = await import('../index.js')
   const { ctx, registrations } = mockCtx()
   await apply(ctx)
   const speak = registrations.tools.find((t) => t.name === 'speak')
 
   const agent = { session: mockSession('/speak-ws') }
-  agent.session.append('teacher/mode', { active: true, course: null })
-  const result = await speak.execute({ text: 'Hello, learner!', voice: 'en-US' }, { agent })
+  const result = await speak.execute({ text: 'Hello, learner!', voice: 'onee' }, { agent })
   assert.equal(result.ok, true)
-  const spoken = agent.session.events.find((e) => e.type === 'teacher/spoken')
-  assert.ok(spoken, 'teacher/spoken event appended')
+  const spoken = agent.session.events.find((e) => e.type === 'voice/spoken')
+  assert.ok(spoken, 'voice/spoken event appended')
   assert.equal(spoken.data.text, 'Hello, learner!')
-  assert.equal(spoken.data.voice, 'en-US')
+  assert.equal(spoken.data.voice, 'onee')
 })
 
 test('next_question auto-requests speech of the question prompt in the Socratic walk', async () => {
@@ -663,14 +682,13 @@ test('next_question auto-requests speech of the question prompt in the Socratic 
 
   const agent = { session: mockSession('/nq-speak-ws') }
   await imp.execute({ courseTitle: 'Speak', markdown: '## Q1: What is gravity?\n<!-- answer: a force -->\n' }, { agent })
-  const before = agent.session.events.length
   await nq.execute({ index: 0 }, { agent })
-  const spoken = agent.session.events.filter((e) => e.type === 'teacher/spoken').at(-1)
-  assert.ok(spoken, 'teacher/spoken appended automatically')
+  const spoken = agent.session.events.filter((e) => e.type === 'voice/spoken').at(-1)
+  assert.ok(spoken, 'voice/spoken appended automatically')
   assert.equal(spoken.data.text, 'What is gravity?')
 
-  // Muted TTS → no auto-speak.
-  agent.session.append('teacher/speak', { enabled: false })
+  // Muted TTS → no auto-speak (the core /speak toggle writes voice/speak).
+  agent.session.append('voice/speak', { enabled: false })
   const before2 = agent.session.events.length
   await nq.execute({ index: 0 }, { agent })
   assert.equal(agent.session.events.length, before2, 'no spoken event while muted')
