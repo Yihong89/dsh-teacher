@@ -153,3 +153,19 @@ test('collection: blanks normalized and answers never leaked', () => {
     assert.ok(!('correct' in q))
   }
 })
+
+test('publicQuestions output is lossless JSON (no undefined values)', () => {
+  const { course } = (() => {
+    const parsed = parseCurriculum(
+      '1. prompt → **Answer:** X\n' +
+      '2. Which is right?\nA. opt1\nB. opt2 ✅\n' +
+      '3. prompt with no options\n→ **Answer:** Y\n',
+    )
+    return { course: parsed }
+  })()
+  const rows = publicQuestions(course)
+  for (const row of rows) {
+    const roundTripped = JSON.parse(JSON.stringify(row))
+    assert.deepEqual(row, roundTripped, `row ${row.id} must round-trip losslessly`)
+  }
+})
