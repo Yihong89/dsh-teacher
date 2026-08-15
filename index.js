@@ -394,22 +394,30 @@ class TeacherController {
     return { runId }
   }
 
-  /** Pull a quiz run (questions with answer keys + the user's answers) for LLM analysis. */
+  /** Pull a quiz run (answered questions with answer keys + the user's answers) for LLM analysis. */
   async quizRunForAnalysis(agent, runId) {
     const store = await this.storeHandle()
     const run = store.store.getQuizRun(runId)
     if (run === null) throw new Error(`quiz run ${runId} not found`)
-    return {
-      runId: run.runId,
-      status: run.status,
-      courseTitle: run.course?.title ?? 'untitled',
-      questions: (run.course?.questions ?? []).map((q) => ({
+    const byQid = new Map((run.course?.questions ?? []).map((q) => [q.id, q]))
+    const questions = (run.answers ?? []).map((a) => {
+      const q = byQid.get(String(a.qid))
+      if (q === undefined) {
+        return { id: String(a.qid), prompt: '(question not found in course)', answerKey: null, hints: [] }
+      }
+      return {
         id: q.id,
         prompt: q.prompt,
         ...(Array.isArray(q.options) && q.options.length > 0 ? { options: q.options } : {}),
         ...(q.answer != null ? { answerKey: q.answer } : {}),
         ...(Array.isArray(q.hints) && q.hints.length > 0 ? { hints: q.hints } : {}),
-      })),
+      }
+    })
+    return {
+      runId: run.runId,
+      status: run.status,
+      courseTitle: run.course?.title ?? 'untitled',
+      questions,
       answers: run.answers,
     }
   }
@@ -1210,10 +1218,19 @@ export async function apply(ctx) {
         if (result.status === 'analyzed') {
           return [{ type: 'text', text: `Quiz run ${result.runId} marked analyzed.` }]
         }
-        return [{
-          type: 'text',
-          text: `Quiz run ${result.runId} — ${result.courseTitle}: ${result.questionCount} question(s), ${result.answers.length} answer(s). Grade them, then walk the misses.`,
-        }]
+        // The model reads the RENDERED text as the tool result — the full
+        // graded payload must be inline, not a summary.
+        const lines = [`Quiz run ${result.runId} — ${result.courseTitle} (${result.questions.length} answered question(s)):`]
+        result.questions.forEach((q, i) => {
+          const answer = (result.answers ?? []).find((a) => a.qid === q.id)?.answer ?? ''
+          lines.push(`${i + 1}. ${q.prompt}`)
+          if (Array.isArray(q.options) && q.options.length > 0) lines.push(`   Options: ${q.options.join(' | ')}`)
+          lines.push(`   User answer: "${answer}"`)
+          lines.push(`   Answer key: "${q.answerKey ?? '(none)'}"`)
+          if (Array.isArray(q.hints) && q.hints.length > 0) lines.push(`   Hints: ${q.hints.join(' | ')}`)
+        })
+        lines.push('Grade each against the answer key (correct | partial | wrong | no-answer), call grade_answer per question and note_gap for non-correct ones, then run the Socratic walk only on the misses. When the walk is done, call analyze_quiz again with done: true.')
+        return [{ type: 'text', text: lines.join('\n') }]
       },
     },
     execute: async (args, exec) => {
