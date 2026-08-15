@@ -612,3 +612,26 @@ test('grade_answer and note_gap work without any loaded course when courseTitle 
   assert.equal(graded.updated.length, 1)
   assert.equal(graded.updated[0].status, 'mastered')
 })
+
+test('the shared course pool is global — importing the same title from any session replaces the one course', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx({ webServer: true })
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const route = registrations.webRoutes.find((r) => r.path === '/dsh-teacher/courses')
+
+  // Two different sessions (one with a cwd, one cwd-less) import the same title.
+  const dirAgent = { session: mockSession('/ws-a') }
+  await imp.execute({ courseTitle: 'English', markdown: '## Q1: A?\n<!-- answer: a -->\n' }, { agent: dirAgent })
+  const sessAgent = { session: { id: 's-dup', meta: {}, events: [], append(type, data) { this.events.push({ type, data }) } } }
+  await imp.execute({ courseTitle: 'English', markdown: '## Q1: A?\n<!-- answer: a -->\n' }, { agent: sessAgent })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  let body = ''
+  await route.handler({}, { writeHead: () => {}, end: (b) => { body = b } })
+  const res = JSON.parse(body)
+  assert.equal(res.ok, true)
+  const english = res.courses.filter((c) => c.title === 'English')
+  assert.equal(english.length, 1, 'one shared course per title — no duplicates')
+  assert.equal(english[0].workspace, 'global')
+})

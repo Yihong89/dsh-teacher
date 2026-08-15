@@ -157,7 +157,8 @@ npm test          # node:test — zero runtime deps beyond DSH itself
   package.json and registered at the `./client` exports subpath.
 - Ledger location: `$DSH_HOME/state/dsh-teacher/ledger.db` (falls back to `.json`).
 - Question store: `$DSH_HOME/state/dsh-teacher/question-store.db` (falls back to
-  `.json`); the legacy v0.2 per-workspace JSON course files are imported once on
+  `.json`) — a **single global pool** of courses shared by every teacher
+  session; the legacy v0.2 per-workspace JSON course files are imported once on
   first load.
 
 ## License

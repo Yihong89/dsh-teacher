@@ -56,6 +56,10 @@ export const inject = ['tools', 'systemPrompt']
 
 const DEFAULT_FIRST_INTERVAL_DAYS = 1
 
+/** Single global scope for courses, quiz runs, preferences, and the gap ledger —
+ * every teacher session shares the same question pool and gap memory. */
+const GLOBAL_WORKSPACE = 'global'
+
 function nowMs() {
   return Date.now()
 }
@@ -141,9 +145,8 @@ class TeacherController {
     return null
   }
 
-  /** Restore a persisted course: logged courseId → workspace selection → latest → legacy JSON. */
+  /** Restore a persisted course: logged courseId → global selection → latest → legacy JSON. */
   restoreCourse(agent) {
-    const workspace = this.workspaceOf(agent)
     const store = this.questionStore?.store
     if (store !== undefined) {
       try {
@@ -152,22 +155,22 @@ class TeacherController {
           const byId = store.courseById(lastCourse.courseId)
           if (byId !== null) return { course: byId, source: byId.source }
         }
-        const selectedId = store.getSelectedCourseId(workspace)
+        const selectedId = store.getSelectedCourseId()
         if (selectedId !== null) {
           const byId = store.courseById(selectedId)
-          if (byId !== null && byId.workspace === workspace) return { course: byId, source: byId.source }
+          if (byId !== null) return { course: byId, source: byId.source }
         }
-        const db = store.latestCourse(workspace)
+        const db = store.latestCourse()
         if (db !== null) return { course: db, source: db.source }
       } catch (error) {
         this.ctx.logger?.warn?.(`dsh-teacher: failed to read course from store: ${error}`)
       }
     }
     try {
-      const legacy = loadCourse(workspace)
+      const legacy = loadCourse(this.workspaceOf(agent))
       if (legacy !== null) {
         // One-time migration: write the legacy JSON course into the DB.
-        this.importLegacyCourse(workspace, legacy)
+        this.importLegacyCourse(legacy)
         return { course: legacy, source: 'legacy-import' }
       }
     } catch {
@@ -176,11 +179,10 @@ class TeacherController {
     return null
   }
 
-  /** Fire-and-forget migration of a v0.2 JSON course into the question store. */
-  importLegacyCourse(workspace, course) {
+  /** Fire-and-forget migration of a v0.2 JSON course into the global store. */
+  importLegacyCourse(course) {
     void this.storeHandle().then(({ store }) => {
       store.upsertCourse({
-        workspace,
         title: course.title ?? 'untitled',
         source: 'legacy-import',
         questions: course.questions,
@@ -197,28 +199,14 @@ class TeacherController {
    * `teacher/course` event so the `teacherQuiz` projection and popup see it.
    * Idempotent: no-ops when the session already has a course or a logged
    * course event. The quiz popup still only OPENS on explicit user request
-   * (📝 button or /quiz) — hydration only makes it available.
+   * (📝 button or /quiz) — hydration only makes it available. The store is
+   * GLOBAL, so every teacher session hydrates the same shared courses.
    */
   hydrateSession(agent) {
     const key = this.sessionKey(agent)
     if (foldTeacherState(agent.session.events).lastCourse !== null) return false
     if (this.stateOf(agent)?.course != null) return false
-    const workspace = this.workspaceOf(agent)
-    let restored = this.restoreCourse(agent)
-    // Fallback: a session without a real cwd (workspaceOf = session id)
-    // inherits the most recently updated directory-keyed course, so a fresh
-    // session on a picked workspace still sees the loaded question bank.
-    if (restored === null && !workspace.startsWith('/') && !workspace.startsWith('~')) {
-      const store = this.questionStore?.store
-      if (store !== undefined) {
-        try {
-          const dir = store.latestDirectoryCourse()
-          if (dir !== null) restored = { course: dir, source: dir.source }
-        } catch (error) {
-          this.ctx.logger?.warn?.(`dsh-teacher: failed to hydrate from store: ${error}`)
-        }
-      }
-    }
+    const restored = this.restoreCourse(agent)
     if (restored === null) return false
     this.sessions.set(key, { course: restored.course, coursePath: restored.source ?? 'persisted' })
     try {
@@ -241,19 +229,17 @@ class TeacherController {
    * and the `teacherQuiz` projection can render it without the model.
    */
   async persistCourse(agent, course, source) {
-    const workspace = this.workspaceOf(agent)
     let courseId = null
     try {
       const store = await this.storeHandle()
       courseId = store.store.upsertCourse({
-        workspace,
         title: course.title ?? 'untitled',
         source: source ?? null,
         questions: course.questions,
       })
-      // Loading a course makes it this workspace's selected course, so fresh
+      // Loading a course makes it the GLOBAL selected course, so fresh
       // sessions hydrate the subject the user last worked on.
-      store.store.setSelectedCourseId(workspace, courseId)
+      store.store.setSelectedCourseId(courseId)
     } catch (error) {
       this.ctx.logger?.warn?.(`dsh-teacher: failed to persist course: ${error}`)
     }
@@ -267,6 +253,11 @@ class TeacherController {
     } catch (error) {
       this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/course: ${error}`)
     }
+  }
+
+  /** Global key shared by every session for the durable gap ledger. */
+  get globalKey() {
+    return GLOBAL_WORKSPACE
   }
 
   /** Workspace key used to scope the durable ledger. */
@@ -324,7 +315,6 @@ class TeacherController {
   async autoEnterTeacherMode(agent) {
     const folded = foldTeacherState(agent.session.events)
     if (folded.active) return
-    const workspace = this.workspaceOf(agent)
     let store
     try {
       store = await this.storeHandle()
@@ -332,16 +322,7 @@ class TeacherController {
       this.ctx.logger?.warn?.(`dsh-teacher: failed to open store for auto mode: ${error}`)
       return
     }
-    let run = store.store.latestPendingRun(workspace)
-    // cwd-less session fallback: pick the most recent pending run of any
-    // directory-keyed workspace.
-    if (run === null && !workspace.startsWith('/') && !workspace.startsWith('~')) {
-      try {
-        run = store.store.latestPendingRunDirectory()
-      } catch (error) {
-        this.ctx.logger?.warn?.(`dsh-teacher: failed to find pending run: ${error}`)
-      }
-    }
+    const run = store.store.latestPendingRun()
     if (run === null) return
     this.set(agent, true)
     try {
@@ -387,7 +368,7 @@ class TeacherController {
   async wrongQuestions(agent) {
     const state = this.stateOf(agent)
     if (state === null) throw new Error('no course loaded')
-    const workspace = this.workspaceOf(agent)
+    const workspace = GLOBAL_WORKSPACE
     const courseTitle = state.course.title ?? 'untitled'
     const ledger = await this.ledgerHandle()
     const gaps = ledger.store.listGaps({ workspace, course: courseTitle })
@@ -416,7 +397,7 @@ class TeacherController {
   async summary(agent) {
     const state = this.stateOf(agent)
     if (state === null) throw new Error('no course loaded')
-    const workspace = this.workspaceOf(agent)
+    const workspace = GLOBAL_WORKSPACE
     const courseTitle = state.course.title ?? 'untitled'
     const ledger = await this.ledgerHandle()
     const gaps = ledger.store.listGaps({ workspace, course: courseTitle })
@@ -481,10 +462,10 @@ class TeacherController {
     const state = this.stateOf(agent)
     if (state === null || state.course === null) throw new Error('no course loaded (run /teach <path.md>)')
     const store = await this.storeHandle()
-    const latest = store.store.latestCourse(this.workspaceOf(agent))
-    if (latest === null) throw new Error('no persisted course for this workspace')
+    const latest = store.store.latestCourse()
+    if (latest === null) throw new Error('no persisted course')
     const { runId } = store.store.createQuizRun({
-      workspace: this.workspaceOf(agent),
+      workspace: GLOBAL_WORKSPACE,
       courseId: latest.courseId,
       answers: answers.map((a) => ({ qid: String(a.qid), answer: String(a.answer ?? '') })),
     })
@@ -505,7 +486,7 @@ class TeacherController {
         coursePath: run.course.source ?? 'from-run',
       })
       try {
-        store.store.setSelectedCourseId(run.workspace, run.course.courseId)
+        store.store.setSelectedCourseId(run.course.courseId)
       } catch (error) {
         this.ctx.logger?.warn?.(`dsh-teacher: failed to record run course selection: ${error}`)
       }
@@ -553,7 +534,7 @@ class TeacherController {
    */
   async recordGap(agent, input) {
     const state = this.stateOf(agent)
-    const workspace = this.workspaceOf(agent)
+    const workspace = GLOBAL_WORKSPACE
     const courseTitle = (input.courseTitle ?? state?.course?.title) ?? 'untitled'
     const ledger = await this.ledgerHandle()
     const existing = ledger.store.gapsForQuestion(workspace, courseTitle, input.questionId)
@@ -580,7 +561,7 @@ class TeacherController {
   /** Grade a question's open gaps with FSRS; mark mastered on correct. */
   async gradeQuestion(agent, { questionId, verdict, courseTitle }) {
     const state = this.stateOf(agent)
-    const workspace = this.workspaceOf(agent)
+    const workspace = GLOBAL_WORKSPACE
     const resolvedCourse = (courseTitle ?? state?.course?.title) ?? 'untitled'
     const ledger = await this.ledgerHandle()
     const gaps = ledger.store.gapsForQuestion(workspace, resolvedCourse, questionId)
@@ -716,7 +697,7 @@ export async function apply(ctx) {
             return
           }
           const { runId } = store.store.createQuizRun({
-            workspace: course.workspace,
+            workspace: GLOBAL_WORKSPACE,
             courseId,
             answers: answers.map((a) => ({ qid: String(a.qid), answer: String(a.answer ?? '') })),
           })
@@ -738,8 +719,28 @@ export async function apply(ctx) {
         try {
           const store = await controller.storeHandle()
           const courses = store.store.listAllCourses()
+          // Deduplicate by title for the popup picker: the same subject can
+          // exist under the real workspace AND under stale session-id
+          // workspaces (sessions that had no cwd at import time). Prefer the
+          // directory-keyed workspace, then the most recently updated row.
+          const isDirectoryWorkspace = (w) => w.startsWith('/') || w.startsWith('~')
+          const byTitle = new Map()
+          for (const c of courses) {
+            const key = String(c.title).toLowerCase()
+            const existing = byTitle.get(key)
+            if (existing === undefined) {
+              byTitle.set(key, c)
+              continue
+            }
+            const curDir = isDirectoryWorkspace(existing.workspace) ? 1 : 0
+            const nextDir = isDirectoryWorkspace(c.workspace) ? 1 : 0
+            if (nextDir > curDir || (nextDir === curDir && c.updatedAt > existing.updatedAt)) {
+              byTitle.set(key, c)
+            }
+          }
+          const deduped = [...byTitle.values()]
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, courses }))
+          res.end(JSON.stringify({ ok: true, courses: deduped }))
         } catch (error) {
           res.writeHead(500, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: false, error: String(error?.message ?? error) }))
@@ -774,7 +775,7 @@ export async function apply(ctx) {
             respond(404, { ok: false, error: `course ${courseId} not found` })
             return
           }
-          store.store.setSelectedCourseId(course.workspace, courseId)
+          store.store.setSelectedCourseId(courseId)
           respond(200, {
             ok: true,
             course: {
@@ -886,7 +887,7 @@ export async function apply(ctx) {
         if (course === null) {
           return { kind: 'success', text: 'No course loaded. Run /teach <path-to-questions.md> first.' }
         }
-        const workspace = controller.workspaceOf(agent)
+        const workspace = GLOBAL_WORKSPACE
         const courseTitle = course.title ?? 'untitled'
         const ledger = await controller.ledgerHandle()
         const gaps = ledger.store.listGaps({ workspace, course: courseTitle })
@@ -916,7 +917,7 @@ export async function apply(ctx) {
         if (course === null) {
           return { kind: 'success', text: 'No course loaded. Run /teach <path-to-questions.md> first.' }
         }
-        const workspace = controller.workspaceOf(agent)
+        const workspace = GLOBAL_WORKSPACE
         const courseTitle = course.title ?? 'untitled'
         const ledger = await controller.ledgerHandle()
         const due = ledger.store.dueGaps({ workspace, course: courseTitle })
@@ -941,22 +942,21 @@ export async function apply(ctx) {
 
     commandCtx.commands.register({
       name: 'course',
-      description: 'List the courses in this workspace, or switch the active course by title',
+      description: 'List the shared courses, or switch the active course by title',
       input: { hint: '[<title>]' },
       handler: async ({ agent, rawInput }) => {
-        const workspace = controller.workspaceOf(agent)
         const store = await controller.storeHandle()
-        const courses = store.store.listCourses(workspace)
+        const courses = store.store.listCourses()
         const name = rawInput.trim()
         if (name === '') {
           if (courses.length === 0) {
-            return { kind: 'success', text: 'No courses in this workspace yet. Run /teach <path-to-questions.md> to load one.' }
+            return { kind: 'success', text: 'No courses yet. Run /teach <path-to-questions.md> to load one.' }
           }
           const current = controller.courseOf(agent)
           return {
             kind: 'success',
             text: [
-              `Courses in this workspace (${courses.length}):`,
+              `Shared courses (${courses.length}):`,
               ...courses.map((c) => `- ${c.title} (${c.questionCount} questions)${current !== null && current.title === c.title ? ' ← active' : ''}`),
               '',
               'Switch with /course <title>.',
@@ -976,7 +976,7 @@ export async function apply(ctx) {
           course: byId,
           coursePath: byId.source ?? 'switched',
         })
-        store.store.setSelectedCourseId(workspace, match.courseId)
+        store.store.setSelectedCourseId(match.courseId)
         try {
           agent.session.append(COURSE_EVENT, {
             courseId: byId.courseId,
@@ -1292,7 +1292,7 @@ export async function apply(ctx) {
       requireTeacherMode(agent)
       const course = controller.courseOf(agent)
       if (course === null) throw new Error('no course loaded (run /teach <path.md>)')
-      const workspace = controller.workspaceOf(agent)
+      const workspace = GLOBAL_WORKSPACE
       const courseTitle = course.title ?? 'untitled'
       const ledger = await controller.ledgerHandle()
       const due = ledger.store.dueGaps({ workspace, course: courseTitle })

@@ -38,13 +38,12 @@ async function withStore(kind, fn) {
 }
 
 for (const kind of ['db', 'json']) {
-  test(`[${kind}] upsertCourse/latestCourse round-trips a course by workspace`, async () => {
+  test(`[${kind}] upsertCourse/latestCourse round-trips a course in the shared pool`, async () => {
     await withStore(kind, (store) => {
       const course = parseCurriculum(SAMPLE)
-      const workspace = '/Users/me/projects/demo'
-      store.upsertCourse({ workspace, title: 'Networking', source: 'notes.md', questions: course.questions })
+      store.upsertCourse({ title: 'Networking', source: 'notes.md', questions: course.questions })
 
-      const latest = store.latestCourse(workspace)
+      const latest = store.latestCourse()
       assert.ok(latest !== null)
       assert.equal(latest.title, 'Networking')
       assert.equal(latest.source, 'notes.md')
@@ -54,19 +53,16 @@ for (const kind of ['db', 'json']) {
       assert.equal(latest.questions[1].answer, 'B')
       assert.equal(latest.questions[1].options.length, 2)
       assert.deepEqual(latest.questions[0].hints, ['three letters, connection-oriented'])
-      // a second workspace has no course
-      assert.equal(store.latestCourse('/other/workspace'), null)
     })
   })
 
-  test(`[${kind}] multiple courses with different titles coexist per workspace`, async () => {
+  test(`[${kind}] multiple courses with different titles coexist in the shared pool`, async () => {
     await withStore(kind, (store) => {
-      const ws = '/ws/multi'
-      const englishId = store.upsertCourse({ workspace: ws, title: 'English', source: 'en.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
-      const scienceId = store.upsertCourse({ workspace: ws, title: 'Science', source: 'sc.md', questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n## Q2: Y?\n<!-- answer: y -->\n').questions })
-      const mathId = store.upsertCourse({ workspace: ws, title: 'Math', source: 'ma.md', questions: parseCurriculum('## Q1: M?\n<!-- answer: m -->\n').questions })
+      const englishId = store.upsertCourse({ title: 'English', source: 'en.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
+      const scienceId = store.upsertCourse({ title: 'Science', source: 'sc.md', questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n## Q2: Y?\n<!-- answer: y -->\n').questions })
+      const mathId = store.upsertCourse({ title: 'Math', source: 'ma.md', questions: parseCurriculum('## Q1: M?\n<!-- answer: m -->\n').questions })
 
-      const listed = store.listCourses(ws)
+      const listed = store.listCourses()
       assert.equal(listed.length, 3)
       assert.deepEqual(listed.map((c) => c.title).sort(), ['English', 'Math', 'Science'])
       const byTitle = Object.fromEntries(listed.map((c) => [c.title, c]))
@@ -74,7 +70,7 @@ for (const kind of ['db', 'json']) {
       assert.equal(byTitle.Science.questionCount, 2)
 
       // latest is the most recently updated course
-      assert.equal(store.latestCourse(ws).title, 'Math')
+      assert.equal(store.latestCourse().title, 'Math')
       // courseById still resolves each
       assert.equal(store.courseById(englishId).title, 'English')
       assert.equal(store.courseById(scienceId).title, 'Science')
@@ -82,34 +78,32 @@ for (const kind of ['db', 'json']) {
     })
   })
 
-  test(`[${kind}] upserting the same title replaces that course (id kept, others untouched)`, async () => {
+  test(`[${kind}] upserting the same title replaces that course globally (id kept, others untouched)`, async () => {
     await withStore(kind, (store) => {
-      const ws = '/ws/replace'
-      const englishId = store.upsertCourse({ workspace: ws, title: 'English', source: 'a.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
-      const scienceId = store.upsertCourse({ workspace: ws, title: 'Science', source: 's.md', questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n').questions })
+      const englishId = store.upsertCourse({ title: 'English', source: 'a.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
+      const scienceId = store.upsertCourse({ title: 'Science', source: 's.md', questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n').questions })
 
-      const again = store.upsertCourse({ workspace: ws, title: 'English', source: 'b.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n## Q2: B?\n<!-- answer: b -->\n').questions })
+      const again = store.upsertCourse({ title: 'English', source: 'b.md', questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n## Q2: B?\n<!-- answer: b -->\n').questions })
       assert.equal(again, englishId, 'same title keeps the course id')
 
-      const listed = store.listCourses(ws)
+      const listed = store.listCourses()
       assert.equal(listed.length, 2, 'English replaced, Science untouched')
       const english = listed.find((c) => c.title === 'English')
       assert.equal(english.questionCount, 2)
-      assert.equal(store.latestCourse(ws).title, 'English')
+      assert.equal(store.latestCourse().title, 'English')
       assert.equal(store.courseById(scienceId).questions.length, 1)
     })
   })
 
-  test(`[${kind}] course selection preference round-trips per workspace`, async () => {
+  test(`[${kind}] course selection preference is global (shared by every session)`, async () => {
     await withStore(kind, (store) => {
-      const ws = '/ws/pref'
-      const a = store.upsertCourse({ workspace: ws, title: 'A', source: null, questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
-      const b = store.upsertCourse({ workspace: ws, title: 'B', source: null, questions: parseCurriculum('## Q1: B?\n<!-- answer: b -->\n').questions })
-      assert.equal(store.getSelectedCourseId(ws), null)
-      store.setSelectedCourseId(ws, b)
-      assert.equal(store.getSelectedCourseId(ws), b)
-      store.setSelectedCourseId(ws, a)
-      assert.equal(store.getSelectedCourseId(ws), a)
+      const a = store.upsertCourse({ title: 'A', source: null, questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
+      const b = store.upsertCourse({ title: 'B', source: null, questions: parseCurriculum('## Q1: B?\n<!-- answer: b -->\n').questions })
+      assert.equal(store.getSelectedCourseId(), null)
+      store.setSelectedCourseId(b)
+      assert.equal(store.getSelectedCourseId(), b)
+      store.setSelectedCourseId(a)
+      assert.equal(store.getSelectedCourseId(), a)
     })
   })
 
@@ -139,13 +133,12 @@ for (const kind of ['db', 'json']) {
     })
   })
 
-  test(`[${kind}] courseById resolves a course with its workspace`, async () => {
+  test(`[${kind}] courseById resolves a course (workspace is the global marker)`, async () => {
     await withStore(kind, (store) => {
-      const ws = '/ws/byid'
-      const courseId = store.upsertCourse({ workspace: ws, title: 'ById', source: null, questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
+      const courseId = store.upsertCourse({ title: 'ById', source: null, questions: parseCurriculum('## Q1: A?\n<!-- answer: a -->\n').questions })
       const byId = store.courseById(courseId)
       assert.ok(byId !== null)
-      assert.equal(byId.workspace, ws)
+      assert.equal(byId.workspace, 'global')
       assert.equal(byId.title, 'ById')
       assert.equal(byId.questions.length, 1)
       assert.equal(store.courseById(999999), null)
@@ -199,31 +192,18 @@ test('publicQuestion includes options and hints but never the answer', () => {
 })
 
 for (const kind of ['db', 'json']) {
-  test(`[${kind}] latestPendingRun finds the most recent un-analyzed run per workspace`, async () => {
+  test(`[${kind}] latestPendingRun finds the most recent un-analyzed run globally`, async () => {
     await withStore(kind, (store) => {
-      const ws = '/ws/pending'
-      const cid = store.upsertCourse({ workspace: ws, title: 'S', source: null, questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n').questions })
-      assert.equal(store.latestPendingRun(ws), null)
-      const { runId: r1 } = store.createQuizRun({ workspace: ws, courseId: cid, answers: [{ qid: 'q1', answer: 'a' }] })
-      const { runId: r2 } = store.createQuizRun({ workspace: ws, courseId: cid, answers: [{ qid: 'q1', answer: 'b' }] })
-      const pending = store.latestPendingRun(ws)
+      const cid = store.upsertCourse({ title: 'S', source: null, questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n').questions })
+      assert.equal(store.latestPendingRun(), null)
+      const { runId: r1 } = store.createQuizRun({ workspace: 'global', courseId: cid, answers: [{ qid: 'q1', answer: 'a' }] })
+      const { runId: r2 } = store.createQuizRun({ workspace: 'global', courseId: cid, answers: [{ qid: 'q1', answer: 'b' }] })
+      const pending = store.latestPendingRun()
       assert.equal(pending.runId, r2, 'most recent pending run wins')
       store.markQuizRunAnalyzed(r2, null)
-      assert.equal(store.latestPendingRun(ws).runId, r1, 'analyzed runs are skipped')
-      // other workspaces are not mixed in
-      store.upsertCourse({ workspace: '/ws/other', title: 'O', source: null, questions: parseCurriculum('## Q1: Y?\n<!-- answer: y -->\n').questions })
-      assert.equal(store.latestPendingRun('/ws/other'), null)
+      assert.equal(store.latestPendingRun().runId, r1, 'analyzed runs are skipped')
     })
   })
 
-  test(`[${kind}] latestPendingRunDirectory scopes to real directory workspaces`, async () => {
-    await withStore(kind, (store) => {
-      const dirCid = store.upsertCourse({ workspace: '/ws/dir', title: 'D', source: null, questions: parseCurriculum('## Q1: X?\n<!-- answer: x -->\n').questions })
-      const sessCid = store.upsertCourse({ workspace: 'session-abc', title: 'S', source: null, questions: parseCurriculum('## Q1: Y?\n<!-- answer: y -->\n').questions })
-      store.createQuizRun({ workspace: 'session-abc', courseId: sessCid, answers: [{ qid: 'q1', answer: 'a' }] })
-      const { runId } = store.createQuizRun({ workspace: '/ws/dir', courseId: dirCid, answers: [{ qid: 'q1', answer: 'b' }] })
-      const found = store.latestPendingRunDirectory()
-      assert.equal(found.runId, runId, 'session-id workspaces are excluded')
-    })
-  })
+  // (latestPendingRunDirectory removed — the store is global)
 }
