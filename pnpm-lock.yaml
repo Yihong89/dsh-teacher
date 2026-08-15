@@ -144,7 +144,7 @@ packages:
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
   dsh-voice-core@https://codeload.github.com/Yihong89/dsh-voice-core/tar.gz/0faf77544582f6b9ebac0b6b9505ce3a740a2ec4:
-    resolution: {gitHosted: true, integrity: sha512-yilw3+VrJH2Iz7782b7diu/flWc8g9ims4X91ahnYnBNTty/iNkX1ja1U1+1Qx6pHh0T8W5aNrit1BsHXjMZGw==, tarball: https://codeload.github.com/Yihong89/dsh-voice-core/tar.gz/0faf77544582f6b9ebac0b6b9505ce3a740a2ec4}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/Yihong89/dsh-voice-core/tar.gz/0faf77544582f6b9ebac0b6b9505ce3a740a2ec4}
     version: 0.1.0
     engines: {node: '>=22.5.0'}
     peerDependencies:
