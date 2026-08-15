@@ -172,3 +172,73 @@ test('next_question inject exposes a send that submits the clicked option', () =
   props.send('Option A')
   assert.deepEqual(sent, ['Option A'])
 })
+
+test('assistantNodeText reads harness blocks by kind, skipping reasoning', () => {
+  const { moduleObj } = loadBundle()
+  const { assistantNodeText } = moduleObj._test
+  const node = {
+    kind: 'assistant',
+    seq: 7,
+    blocks: [
+      { kind: 'text', text: 'Hello there' },
+      { kind: 'reasoning', text: 'chain of thought — must not be spoken' },
+      { kind: 'text', text: ' second part' },
+      { type: 'text', text: ' legacy-spelled block' },
+      { kind: 'tool-call', callId: 'c', name: 'speak', argsRaw: '{}' },
+    ],
+  }
+  assert.equal(assistantNodeText(node), 'Hello there\n second part\n legacy-spelled block')
+})
+
+test('latestAssistantText finds the newest assistant message from raw nodes', () => {
+  const { moduleObj } = loadBundle()
+  const { latestAssistantText } = moduleObj._test
+  const session = {
+    nodes: [
+      { kind: 'user', seq: 1, content: [], source: {} },
+      { kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: 'First answer' }] },
+      { kind: 'assistant', seq: 3, blocks: [{ kind: 'reasoning', text: 'think' }, { kind: 'text', text: 'The latest reply' }] },
+    ],
+    chat: { order: [], nodes: {} },
+  }
+  assert.deepEqual(latestAssistantText(session), { seq: 3, text: 'The latest reply' })
+})
+
+test('latestAssistantText unwraps chat-store view wrappers (assistant-step → finalNode)', () => {
+  const { moduleObj } = loadBundle()
+  const { latestAssistantText } = moduleObj._test
+  const chatNodes = new Map([
+    ['u1', { key: 'u1', kind: 'user', id: 'u1', target: 'chat', data: { kind: 'user', seq: 1, content: [], source: {} } }],
+    ['a1', {
+      key: 'a1',
+      kind: 'assistant-step',
+      id: 'a1',
+      target: 'chat',
+      data: { status: 'final', turn: 1, step: 1, finalNode: { kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: 'Spoken reply' }] } },
+    }],
+  ])
+  const session = {
+    nodes: [],
+    chat: { order: ['u1', 'a1'], nodes: { get: (id) => chatNodes.get(id) } },
+  }
+  assert.deepEqual(latestAssistantText(session), { seq: 2, text: 'Spoken reply' })
+})
+
+test('latestAssistantText skips running steps and returns null when no assistant text', () => {
+  const { moduleObj } = loadBundle()
+  const { latestAssistantText } = moduleObj._test
+  const chatNodes = new Map([
+    ['a1', {
+      key: 'a1',
+      kind: 'assistant-step',
+      id: 'a1',
+      target: 'chat',
+      data: { status: 'running', turn: 1, step: 1, blocks: [{ kind: 'text', text: 'still streaming' }] },
+    }],
+  ])
+  const session = {
+    nodes: [],
+    chat: { order: ['a1'], nodes: { get: (id) => chatNodes.get(id) } },
+  }
+  assert.equal(latestAssistantText(session), null)
+})
