@@ -460,3 +460,51 @@ test('a course persisted to the SQLite store is restored by a fresh controller',
   assert.ok(result.prompt.length > 0)
   assert.equal(result.total, 3)
 })
+
+test('a fresh session is hydrated from the store at pre-step (no re-import)', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const preStep = registrations.events['agent/pre-step'][0]
+  assert.ok(registrations.events['agent/session-start'], 'agent/session-start listener registered')
+
+  // Load a course into the store under a directory workspace.
+  const loader = { session: mockSession('/hydrate-ws') }
+  await imp.execute({ courseTitle: 'Hydrate', markdown: '## Q1: A?\n<!-- answer: a -->\n## Q2: B?\n<!-- answer: b -->\n' }, { agent: loader })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  // A brand-new session (empty log, same workspace, distinct id) hydrates at pre-step.
+  const fresh = { session: { id: 's-fresh', meta: { cwd: '/hydrate-ws' }, events: [], append(type, data) { this.events.push({ type, data }) } } }
+  await preStep({ agent: fresh }, () => {})
+  const courseEvent = fresh.session.events.find((e) => e.type === 'teacher/course')
+  assert.ok(courseEvent, 'teacher/course appended on hydration')
+  assert.equal(courseEvent.data.title, 'Hydrate')
+  assert.equal(courseEvent.data.questions.length, 2)
+  for (const q of courseEvent.data.questions) {
+    assert.equal('answer' in q, false, 'hydrated course event must not carry answer keys')
+  }
+  // Idempotent: a second pre-step does not re-append.
+  const before = fresh.session.events.length
+  await preStep({ agent: fresh }, () => {})
+  assert.equal(fresh.session.events.length, before)
+})
+
+test('hydration falls back to the latest directory-keyed course for cwd-less sessions', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const preStep = registrations.events['agent/pre-step'][0]
+
+  const loader = { session: mockSession('/dir-ws') }
+  await imp.execute({ courseTitle: 'DirCourse', markdown: '## Q1: A?\n<!-- answer: a -->\n' }, { agent: loader })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  // A session with NO cwd key (workspaceOf = session id) inherits the course.
+  const noCwd = { session: { id: 's-no-cwd', events: [], meta: {}, append(type, data) { this.events.push({ type, data }) } } }
+  await preStep({ agent: noCwd }, () => {})
+  const courseEvent = noCwd.session.events.find((e) => e.type === 'teacher/course')
+  assert.ok(courseEvent, 'cwd-less session hydrated from directory fallback')
+  assert.equal(courseEvent.data.title, 'DirCourse')
+})

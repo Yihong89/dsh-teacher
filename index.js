@@ -179,6 +179,51 @@ class TeacherController {
   }
 
   /**
+   * Hydrate a session that has no course of its own yet from the persisted
+   * store, so a fresh teacher session still has the loaded question bank
+   * available (and the quiz popup works without a re-import). Appends the
+   * `teacher/course` event so the `teacherQuiz` projection and popup see it.
+   * Idempotent: no-ops when the session already has a course or a logged
+   * course event. The quiz popup still only OPENS on explicit user request
+   * (📝 button or /quiz) — hydration only makes it available.
+   */
+  hydrateSession(agent) {
+    const key = this.sessionKey(agent)
+    if (foldTeacherState(agent.session.events).lastCourse !== null) return false
+    if (this.stateOf(agent)?.course != null) return false
+    const workspace = this.workspaceOf(agent)
+    let restored = this.restoreCourse(workspace)
+    // Fallback: a session without a real cwd (workspaceOf = session id)
+    // inherits the most recently updated directory-keyed course, so a fresh
+    // session on a picked workspace still sees the loaded question bank.
+    if (restored === null && !workspace.startsWith('/') && !workspace.startsWith('~')) {
+      const store = this.questionStore?.store
+      if (store !== undefined) {
+        try {
+          const dir = store.latestDirectoryCourse()
+          if (dir !== null) restored = { course: dir, source: dir.source }
+        } catch (error) {
+          this.ctx.logger?.warn?.(`dsh-teacher: failed to hydrate from store: ${error}`)
+        }
+      }
+    }
+    if (restored === null) return false
+    this.sessions.set(key, { course: restored.course, coursePath: restored.source ?? 'persisted' })
+    try {
+      agent.session.append(COURSE_EVENT, {
+        courseId: restored.course.courseId ?? null,
+        title: restored.course.title ?? null,
+        source: restored.source ?? null,
+        questions: restored.course.questions.map((q) => publicQuestion(q)),
+      })
+      return true
+    } catch (error) {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/course on hydrate: ${error}`)
+      return false
+    }
+  }
+
+  /**
    * Persist the loaded course to the SQLite store and log its public questions
    * (`teacher/course` event — never answer keys) so the LLM-free quiz popup
    * and the `teacherQuiz` projection can render it without the model.
@@ -526,10 +571,18 @@ export async function apply(ctx) {
   // course synchronously on the first tool use after a restart.
   void controller.storeHandle().catch(() => {})
 
-  // Apply any queued teacher-mode selection before the next request assembly.
+  // Apply any queued teacher-mode selection before the next request assembly,
+  // and hydrate a fresh session's course from the persisted store (so the quiz
+  // popup is available without a re-import; it still only opens on request).
   ctx.on('agent/pre-step', async ({ agent }, next) => {
+    controller.hydrateSession(agent)
     controller.flushPending(agent)
     return next()
+  })
+
+  // A brand-new session gets its persisted course hydrated right at startup.
+  ctx.on('agent/session-start', ({ agent }) => {
+    controller.hydrateSession(agent)
   })
 
   // Session projection: fold teacher/gap + teacher/grade events so the Web
