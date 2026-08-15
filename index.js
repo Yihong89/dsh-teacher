@@ -1115,6 +1115,15 @@ export async function apply(ctx) {
       if (course === null) throw new Error('no course loaded (run /teach <path.md>)')
       const index = Math.max(0, Math.min(Number(args.index ?? 0) | 0, course.questions.length - 1))
       const q = course.questions[index]
+      // Socratic walk: ALWAYS read the question aloud (browser TTS on the
+      // user's machine) unless TTS is muted — no model compliance needed.
+      if (foldTeacherState(agent.session.events).speakEnabled) {
+        try {
+          agent.session.append(SPOKEN_EVENT, { text: q.prompt, voice: null })
+        } catch (error) {
+          controller.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/spoken: ${error}`)
+        }
+      }
       return {
         id: q.id,
         prompt: q.prompt,

@@ -653,3 +653,25 @@ test('speak tool records a teacher/spoken event for the browser to play', async 
   assert.equal(spoken.data.text, 'Hello, learner!')
   assert.equal(spoken.data.voice, 'en-US')
 })
+
+test('next_question auto-requests speech of the question prompt in the Socratic walk', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const nq = registrations.tools.find((t) => t.name === 'next_question')
+
+  const agent = { session: mockSession('/nq-speak-ws') }
+  await imp.execute({ courseTitle: 'Speak', markdown: '## Q1: What is gravity?\n<!-- answer: a force -->\n' }, { agent })
+  const before = agent.session.events.length
+  await nq.execute({ index: 0 }, { agent })
+  const spoken = agent.session.events.filter((e) => e.type === 'teacher/spoken').at(-1)
+  assert.ok(spoken, 'teacher/spoken appended automatically')
+  assert.equal(spoken.data.text, 'What is gravity?')
+
+  // Muted TTS → no auto-speak.
+  agent.session.append('teacher/speak', { enabled: false })
+  const before2 = agent.session.events.length
+  await nq.execute({ index: 0 }, { agent })
+  assert.equal(agent.session.events.length, before2, 'no spoken event while muted')
+})
