@@ -23,10 +23,12 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 
 import { parseCurriculum, publicQuestions } from './lib/curriculum.js'
-import { loadCourse, saveCourse } from './lib/course-store.js'
+import { loadCourse } from './lib/course-store.js'
 import { buildPolicy } from './lib/policy.js'
 import { LedgerStore, gapId, GAP_STATUS } from './lib/ledger.js'
-import { foldTeacherState, hasOpenTurn, MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT } from './lib/fold.js'
+import { QuestionStore, questionStoreFilePath, publicQuestion } from './lib/question-store.js'
+import { quizProjectionWith } from './lib/quiz-projection.js'
+import { foldTeacherState, hasOpenTurn, MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT } from './lib/fold.js'
 import { gapProjectionWith } from './lib/gap-projection.js'
 import {
   buildGap, gapKindForVerdict, isCorrect, ratingForVerdict, verdictLabel,
@@ -43,7 +45,7 @@ import { FSRS, createCard, review } from './lib/fsrs.js'
  * first read of a process, the profile-boot registrar (`dsh-teacher/
  * register-events`) runs first (see lib/register-events.js).
  */
-for (const type of [MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT]) {
+for (const type of [MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT]) {
   KNOWN_SESSION_EVENT_TYPES.add(type)
 }
 
@@ -93,6 +95,7 @@ class TeacherController {
     this.sessions = new Map() // sessionId -> { course, coursePath }
     this.pendingIntents = new Map() // sessionId -> { active, narrate }
     this.ledger = null
+    this.questionStore = null
     this.fsrs = new FSRS()
   }
 
@@ -108,6 +111,14 @@ class TeacherController {
     return this.ledger
   }
 
+  /** Lazy-open the durable SQLite question store (JSON fallback). */
+  async storeHandle() {
+    if (this.questionStore === null) {
+      this.questionStore = await QuestionStore.open(questionStoreFilePath())
+    }
+    return this.questionStore
+  }
+
   stateOf(agent) {
     return this.sessions.get(this.sessionKey(agent)) ?? null
   }
@@ -115,26 +126,86 @@ class TeacherController {
   courseOf(agent) {
     const cached = this.stateOf(agent)?.course ?? null
     if (cached !== null) return cached
-    // Fresh process: reload the persisted course for this workspace so the
-    // loaded question bank survives a server restart.
-    try {
-      const course = loadCourse(this.workspaceOf(agent))
-      if (course !== null) {
-        this.sessions.set(this.sessionKey(agent), { course, coursePath: 'persisted' })
-        return course
-      }
-    } catch {
-      // Unreadable/corrupt course file is treated as no course.
+    // Fresh process: reload the persisted course for this workspace from the
+    // SQLite question store (legacy v0.2 JSON course imported once as fallback).
+    const workspace = this.workspaceOf(agent)
+    const restored = this.restoreCourse(workspace)
+    if (restored !== null) {
+      this.sessions.set(this.sessionKey(agent), {
+        course: restored.course,
+        coursePath: restored.source ?? 'persisted',
+      })
+      return restored.course
     }
     return null
   }
 
-  /** Persist the loaded course to disk so it survives restarts. */
-  persistCourse(agent, course) {
+  /** Restore a persisted course for a workspace: DB first, legacy JSON fallback. */
+  restoreCourse(workspace) {
+    const store = this.questionStore?.store
+    if (store !== undefined) {
+      try {
+        const db = store.latestCourse(workspace)
+        if (db !== null) return { course: db, source: db.source }
+      } catch (error) {
+        this.ctx.logger?.warn?.(`dsh-teacher: failed to read course from store: ${error}`)
+      }
+    }
     try {
-      saveCourse(this.workspaceOf(agent), course)
+      const legacy = loadCourse(workspace)
+      if (legacy !== null) {
+        // One-time migration: write the legacy JSON course into the DB.
+        this.importLegacyCourse(workspace, legacy)
+        return { course: legacy, source: 'legacy-import' }
+      }
+    } catch {
+      // Unreadable/corrupt legacy file is treated as no course.
+    }
+    return null
+  }
+
+  /** Fire-and-forget migration of a v0.2 JSON course into the question store. */
+  importLegacyCourse(workspace, course) {
+    void this.storeHandle().then(({ store }) => {
+      store.upsertCourse({
+        workspace,
+        title: course.title ?? 'untitled',
+        source: 'legacy-import',
+        questions: course.questions,
+      })
+    }).catch((error) => {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to import legacy course: ${error}`)
+    })
+  }
+
+  /**
+   * Persist the loaded course to the SQLite store and log its public questions
+   * (`teacher/course` event — never answer keys) so the LLM-free quiz popup
+   * and the `teacherQuiz` projection can render it without the model.
+   */
+  async persistCourse(agent, course, source) {
+    const workspace = this.workspaceOf(agent)
+    let courseId = null
+    try {
+      const store = await this.storeHandle()
+      courseId = store.store.upsertCourse({
+        workspace,
+        title: course.title ?? 'untitled',
+        source: source ?? null,
+        questions: course.questions,
+      })
     } catch (error) {
       this.ctx.logger?.warn?.(`dsh-teacher: failed to persist course: ${error}`)
+    }
+    try {
+      agent.session.append(COURSE_EVENT, {
+        courseId,
+        title: course.title ?? null,
+        source: source ?? null,
+        questions: course.questions.map((q) => publicQuestion(q)),
+      })
+    } catch (error) {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/course: ${error}`)
     }
   }
 
@@ -273,12 +344,86 @@ class TeacherController {
     }
   }
 
-  /** Load a course into the session state and return it. */
+  /** Load a course into the session state, persist it, and return it. */
   async loadCourse(agent, path) {
     const course = await readCourse(this.ctx, path)
     this.sessions.set(this.sessionKey(agent), { course, coursePath: path })
-    this.persistCourse(agent, course, path)
+    await this.persistCourse(agent, course, path)
     return course
+  }
+
+  /**
+   * Import a course from model-emitted standard markdown (the LLM-based parse
+   * path: the model reads the source file and converts it into structured
+   * questions). Persists to the SQLite store and turns teacher mode on.
+   */
+  async importCurriculum(agent, { courseTitle, markdown, sourcePath }) {
+    const course = parseCurriculum(markdown)
+    if (course.questions.length === 0) {
+      throw new Error(
+        'import_curriculum: no questions found in the converted markdown. Make sure each question is a "## Q<n>: <prompt>" heading with a prompt, and answers are "<!-- answer: ... -->" comments. Read the source file again and retry.',
+      )
+    }
+    for (const q of course.questions) {
+      if (!q.prompt || !q.prompt.trim()) {
+        throw new Error(`import_curriculum: question "${q.id}" has an empty prompt — fix and retry.`)
+      }
+    }
+    course.title = courseTitle || course.title || 'Imported course'
+    this.sessions.set(this.sessionKey(agent), {
+      course,
+      coursePath: sourcePath ?? 'llm-import',
+    })
+    await this.persistCourse(agent, course, sourcePath ?? 'llm-import')
+    this.set(agent, true)
+    return course
+  }
+
+  /** Store one quiz run (submitted by the LLM-free quiz popup). */
+  async startQuizRun(agent, answers) {
+    const state = this.stateOf(agent)
+    if (state === null || state.course === null) throw new Error('no course loaded (run /teach <path.md>)')
+    const store = await this.storeHandle()
+    const latest = store.store.latestCourse(this.workspaceOf(agent))
+    if (latest === null) throw new Error('no persisted course for this workspace')
+    const { runId } = store.store.createQuizRun({
+      workspace: this.workspaceOf(agent),
+      courseId: latest.courseId,
+      answers: answers.map((a) => ({ qid: String(a.qid), answer: String(a.answer ?? '') })),
+    })
+    return { runId }
+  }
+
+  /** Pull a quiz run (questions with answer keys + the user's answers) for LLM analysis. */
+  async quizRunForAnalysis(agent, runId) {
+    const store = await this.storeHandle()
+    const run = store.store.getQuizRun(runId)
+    if (run === null) throw new Error(`quiz run ${runId} not found`)
+    return {
+      runId: run.runId,
+      status: run.status,
+      courseTitle: run.course?.title ?? 'untitled',
+      questions: (run.course?.questions ?? []).map((q) => ({
+        id: q.id,
+        prompt: q.prompt,
+        ...(Array.isArray(q.options) && q.options.length > 0 ? { options: q.options } : {}),
+        ...(q.answer != null ? { answerKey: q.answer } : {}),
+        ...(Array.isArray(q.hints) && q.hints.length > 0 ? { hints: q.hints } : {}),
+      })),
+      answers: run.answers,
+    }
+  }
+
+  /** Mark a quiz run analyzed and log the status change (projection badge). */
+  async markQuizRunAnalyzed(agent, runId, analysis) {
+    const store = await this.storeHandle()
+    store.store.markQuizRunAnalyzed(runId, analysis)
+    try {
+      agent.session.append(QUIZ_RUN_EVENT, { runId: Number(runId), status: 'analyzed' })
+    } catch (error) {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/quiz-run: ${error}`)
+    }
+    return { runId: Number(runId), status: 'analyzed' }
   }
 
   /** Persist one gap: session event + durable ledger row (with FSRS card fields). */
@@ -369,6 +514,10 @@ function requireTeacherMode(agent) {
 export async function apply(ctx) {
   const controller = new TeacherController(ctx)
 
+  // Open the question store eagerly so courseOf() can restore a persisted
+  // course synchronously on the first tool use after a restart.
+  void controller.storeHandle().catch(() => {})
+
   // Apply any queued teacher-mode selection before the next request assembly.
   ctx.on('agent/pre-step', async ({ agent }, next) => {
     controller.flushPending(agent)
@@ -386,7 +535,66 @@ export async function apply(ctx) {
         }),
       ),
     )
+    // teacherQuiz: public questions + quiz state for the LLM-free popup.
+    projectionCtx.sessionProjections.register(
+      quizProjectionWith(
+        z.object({
+          course: z.any(),
+          quizActive: z.boolean(),
+          lastRun: z.any(),
+        }),
+      ),
+    )
   })
+
+  // Quiz-submit route for the LLM-free popup: accepts answers, stores a quiz
+  // run in the SQLite store, returns the run id. It never serves answer keys.
+  // Lazy webServer access keeps headless profiles working (no web server).
+  const webServer = ctx.get('webServer')
+  if (webServer !== undefined && typeof webServer.register === 'function') {
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-teacher/quiz/submit',
+      handler: async (req, res) => {
+        let body = ''
+        for await (const chunk of req) body += chunk
+        let payload = null
+        try {
+          payload = JSON.parse(body)
+        } catch {
+          /* malformed body → 400 below */
+        }
+        const answers = Array.isArray(payload?.answers)
+          ? payload.answers.filter((a) => a !== null && typeof a === 'object' && typeof a.qid === 'string' && typeof a.answer === 'string')
+          : []
+        const courseId = Number(payload?.courseId)
+        const respond = (status, value) => {
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(value))
+        }
+        if (!Number.isInteger(courseId) || answers.length === 0) {
+          respond(400, { ok: false, error: 'courseId and a non-empty answers[] are required' })
+          return
+        }
+        try {
+          const store = await controller.storeHandle()
+          const course = store.store.courseById(courseId)
+          if (course === null) {
+            respond(404, { ok: false, error: `course ${courseId} not found` })
+            return
+          }
+          const { runId } = store.store.createQuizRun({
+            workspace: course.workspace,
+            courseId,
+            answers: answers.map((a) => ({ qid: String(a.qid), answer: String(a.answer ?? '') })),
+          })
+          respond(200, { ok: true, runId })
+        } catch (error) {
+          respond(500, { ok: false, error: String(error?.message ?? error) })
+        }
+      },
+    })
+  }
 
   // Conditional Socratic policy section — empty unless teacher mode is active.
   ctx.systemPrompt.section({
@@ -400,6 +608,7 @@ export async function apply(ctx) {
       return buildPolicy({
         course: course ?? { title: folded.course, questions: [] },
         quiz: folded.quiz,
+        quizRun: folded.lastRun,
       })
     },
   })
@@ -547,7 +756,7 @@ export async function apply(ctx) {
         controller.setQuiz(agent, true)
         return {
           kind: 'success',
-          text: `Quick test mode on — the teacher will quiz you over all ${course.questions.length} questions first, then walk only the ones you miss. Say "start" to begin the test.`,
+          text: `Quiz mode on — the quiz panel is now open: answer all ${course.questions.length} questions there (no AI involved). When you finish, the teacher will analyze your results and walk you through the misses.`,
         }
       },
     })
@@ -663,24 +872,11 @@ export async function apply(ctx) {
     execute: async (args, exec) => {
       const agent = exec.agent
       if (agent === undefined) throw new Error('import_curriculum requires a calling agent')
-      const course = parseCurriculum(args.markdown)
-      if (course.questions.length === 0) {
-        throw new Error(
-          'import_curriculum: no questions found in the converted markdown. Make sure each question is a "## Q<n>: <prompt>" heading with a prompt, and answers are "<!-- answer: ... -->" comments. Read the source file again and retry.',
-        )
-      }
-      for (const q of course.questions) {
-        if (!q.prompt || !q.prompt.trim()) {
-          throw new Error(`import_curriculum: question "${q.id}" has an empty prompt — fix and retry.`)
-        }
-      }
-      course.title = args.courseTitle || course.title || 'Imported course'
-      controller.sessions.set(controller.sessionKey(agent), {
-        course,
-        coursePath: args.sourcePath ?? 'llm-import',
+      const course = await controller.importCurriculum(agent, {
+        courseTitle: args.courseTitle,
+        markdown: args.markdown,
+        sourcePath: args.sourcePath,
       })
-      controller.persistCourse(agent, course, args.sourcePath ?? 'llm-import')
-      controller.set(agent, true)
       const first = course.questions[0]
       return {
         ok: true,
@@ -962,6 +1158,95 @@ export async function apply(ctx) {
         content: v.mode === 'quiz'
           ? `${v.questions.length} questions — ask them all, then call quiz with done: true.`
           : `${v.focus.length} wrong question(s) to walk: ${v.focus.map((f) => f.questionId).join(', ') || 'none'}.`,
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'analyze_quiz',
+    description:
+      'Use only in teacher mode. Analyze a finished quiz run submitted through the LLM-free quiz popup. Without "done": returns the run\'s questions (with hidden answer keys and hints), the user\'s answers, and the course title. Grade each answer against its answer key (correct | partial | wrong | no-answer), call grade_answer per question and note_gap for non-correct ones, then run the Socratic walk only on the misses. After the walk is complete, call analyze_quiz again with done: true to mark the run analyzed.',
+    parameters: {
+      runId: { type: 'number', required: true, description: 'The quiz run id (from the user\'s "Quiz finished (run <id>)" message).' },
+      done: { type: 'boolean', description: 'true marks the run analyzed after the walk is complete.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          runId: { type: 'number', required: true },
+          status: { type: 'string' },
+          courseTitle: { type: 'string' },
+          questionCount: { type: 'number' },
+          questions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string' },
+                prompt: { type: 'string' },
+                options: { type: 'array', items: { type: 'string' } },
+                answerKey: { type: 'string' },
+                hints: { type: 'array', items: { type: 'string' } },
+              },
+            },
+          },
+          answers: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                qid: { type: 'string' },
+                answer: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, result) => {
+        if (result.status === 'analyzed') {
+          return [{ type: 'text', text: `Quiz run ${result.runId} marked analyzed.` }]
+        }
+        return [{
+          type: 'text',
+          text: `Quiz run ${result.runId} — ${result.courseTitle}: ${result.questionCount} question(s), ${result.answers.length} answer(s). Grade them, then walk the misses.`,
+        }]
+      },
+    },
+    execute: async (args, exec) => {
+      const agent = exec.agent
+      if (agent === undefined) throw new Error('analyze_quiz requires a calling agent')
+      requireTeacherMode(agent)
+      if (args.done) {
+        return controller.markQuizRunAnalyzed(agent, args.runId, null)
+      }
+      const run = await controller.quizRunForAnalysis(agent, args.runId)
+      return {
+        runId: run.runId,
+        status: run.status,
+        courseTitle: run.courseTitle,
+        questionCount: run.questions.length,
+        questions: run.questions,
+        answers: run.answers,
+      }
+    },
+    presentCall: (args) => ({
+      card: 'generic',
+      title: `Analyze quiz run ${args.runId}`,
+      kind: 'other',
+    }),
+    presentResult: (_args, result) => {
+      if (result.isError) return void 0
+      const v = result.value
+      return {
+        card: 'generic',
+        title: v.status === 'analyzed' ? 'Quiz analyzed' : 'Quiz run loaded',
+        content: v.status === 'analyzed'
+          ? `Run ${v.runId} marked analyzed.`
+          : `${v.courseTitle} — ${v.questionCount} questions, ${v.answers.length} answers.`,
       }
     },
   }))

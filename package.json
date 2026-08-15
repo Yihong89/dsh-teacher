@@ -1,6 +1,6 @@
 {
   "name": "dsh-teacher",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "DSH teacher plugin: Socratic tutor that leads you to answers from a markdown question set, tracks knowledge gaps in-session, and retests them on a spaced-repetition schedule.",
   "type": "module",
   "main": "index.js",

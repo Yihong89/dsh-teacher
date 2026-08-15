@@ -10,13 +10,17 @@ those gaps on-demand on a spaced-repetition schedule.
 ## The loop
 
 ```
-questions.md  ──▶  /teach questions.md
-                      │  Q1: "What happens when TCP handshake fails?"
-                      │    └─ you (wrong) ──▶ hint ──▶ you (right) ──▶ grade ✓
-                      │  Q2: "Why does rebase rewrite history?"
-                      │    └─ "idk" ──▶ gap noted: rebase, evidence="idk", missing
+questions.md ──▶  /teach questions.md
+                      │  LLM parse / tolerant parser
                       ▼
-            gap ledger (persists across sessions, SQLite)
+        SQLite question store (courses + questions + quiz runs)
+                      │  /quiz → 📝 LLM-free quiz popup (MCQ / free-text)
+                      ▼
+            answers ──▶ POST /dsh-teacher/quiz/submit (run stored)
+                      │  "Quiz finished (run N)" → LLM analysis
+                      ▼
+            grade each answer (vs hidden keys) ──▶ gaps → Socratic walk
+                      │  gap ledger (persists across sessions, SQLite)
                       │  you: "/retest" (on-demand, anytime)
                       ▼
             "Explain rebase to me."  ──▶  graded, rescheduled (FSRS-5)
@@ -24,7 +28,7 @@ questions.md  ──▶  /teach questions.md
 
 ## Status
 
-**v0.2.0 — core + Web client implemented, tests passing (43/43).**
+**v0.3.0 — core + Web client + SQLite question store + LLM-free quiz popup; tests passing (83/83).**
 
 | Milestone | Status |
 |---|---|
@@ -34,8 +38,11 @@ questions.md  ──▶  /teach questions.md
 | M3 FSRS-5 spaced retest (official test vector pinned) | ✅ |
 | M4 Web client (quiz cards, gaps button + panel, gap projection) | ✅ |
 | M5 Publish (dsh-plugin topic ✓, awesome lists, live e2e) | ◐ |
+| M6 SQLite question store (courses/questions/quiz runs) | ✅ |
+| M7 LLM-free quiz popup (MCQ + free-text, `POST /dsh-teacher/quiz/submit`) | ✅ |
+| M8 Post-quiz LLM analysis + Socratic walk (`analyze_quiz`) | ✅ |
 
-Design decisions are in [docs/PLAN.md](docs/PLAN.md).
+Design decisions are in [docs/PLAN.md](docs/PLAN.md) (§10 = the v0.3 redesign).
 
 ## Web client
 
@@ -51,6 +58,13 @@ Once the plugin is installed and the web profile restarted, the browser bundle
   due/✓ mastered), fed by the `teacherGaps` session projection (same seam
   dsh-usage-plugin uses). The durable cross-session ledger stays in `/gaps` and
   `/retest`.
+- **📝 quiz popup** — the **LLM-free quiz**: questions come from the `teacherQuiz`
+  session projection (loaded from the SQLite store, no AI involved); each
+  question shows clickable multiple-choice options when present, else a free-text
+  box, with a 💡 hint toggle. Finish submits your answers to the plugin
+  (`POST /dsh-teacher/quiz/submit`), then the teacher's LLM analysis grades them,
+  records gaps, and walks you through the misses Socratically. Open it from the
+  header button or `/quiz`.
 
 ## Install
 
@@ -77,9 +91,9 @@ title: Networking review
 
 | Command | What it does |
 |---|---|
-| `/teach questions.md` | Load the question set and enter teacher mode (**does not start teaching** — say "start", "quiz me", or ask about a topic) |
+| `/teach questions.md` | Load the question set into the SQLite store and enter teacher mode (**does not start teaching** — say "start", "quiz me", or ask about a topic) |
 | `/teach on` / `/teach off` | Toggle teacher mode (mode is session state, survives resume) |
-| `/quiz` | Quick-test mode: quiz the whole bank first, then walk only the wrong questions |
+| `/quiz` | Open the **LLM-free quiz popup** over the whole bank (MCQ / free-text); finishing it hands the results to the teacher's LLM analysis and the Socratic walk over the misses |
 | `/gaps` | Show the gap ledger for this course |
 | `/retest` | Surface due gaps for an on-demand drill (FSRS-5 schedule) |
 | `/summary` | End-of-session knowledge-gap & misconception summary |
@@ -87,8 +101,9 @@ title: Networking review
 ### Teacher behavior (model tools)
 
 - **`next_question`** — pulls one question at a time; the answer key never appears in tool output.
-- **`import_curriculum`** — loads any markdown question file: read the raw file, extract each question + correct answer, emit them in the standard format. Used when the automatic parser can't make sense of a file's format. Loading a course does **not** start teaching — the teacher waits for your go-ahead.
-- **`quiz`** — quick-test mode: returns the whole bank (no answers); after grading, `done: true` returns the wrong-question list so the walk focuses only on those.
+- **`import_curriculum`** — loads any markdown question file: read the raw file, extract each question + correct answer, emit them in the standard format. Used when the automatic parser can't make sense of a file's format. Loading a course does **not** start teaching — the teacher waits for your go-ahead. Every load persists the course into the SQLite question store.
+- **`quiz`** — legacy quick-test mode over the whole bank; the v0.3 UI prefers the LLM-free quiz popup instead.
+- **`analyze_quiz`** — post-quiz LLM analysis: pass the run id from the popup ("Quiz finished (run N)"), get the run's questions (hidden answer keys + hints) and the user's answers, grade each (correct/partial/wrong/no-answer), record gaps, and walk the misses Socratically; `done: true` marks the run analyzed.
 - **`note_gap`** — records a gap (`wrong | vague | missing | exposed`) with the user's verbatim words + the knowledge point you identified; persisted to the ledger and the session log.
 - **`grade_answer`** — grades against the hidden answer key; updates each open gap's FSRS schedule; `correct` marks gaps mastered.
 - **`retest`** — returns due gaps; drill them one at a time, then `grade_answer`.
@@ -130,15 +145,20 @@ npm test          # node:test — zero runtime deps beyond DSH itself
 ```
 
 - `lib/` — pure logic (curriculum parser, FSRS-5, grading, folding, ledger, gap
-  projection); fully unit-tested, no DSH imports.
+  projection, **SQLite question store**, quiz projection); fully unit-tested, no
+  DSH imports.
 - `index.js` — the Cordis host plugin (prompt section, commands, tools, session
-  events, `teacherGaps` projection). Written in plain JS (no build step); imports
+  events, `teacherGaps` + `teacherQuiz` projections, the
+  `/dsh-teacher/quiz/submit` route). Written in plain JS (no build step); imports
   `@deepseek-ai/dsh-tools` and `zod` at runtime, resolved from the DSH install /
   npm.
 - `lib/client.js` — the Web client: a hand-rolled `__ModuleLoader__` bundle
   (plain JS + `React.createElement`, no build step) declaring `dsh.client` in
   package.json and registered at the `./client` exports subpath.
 - Ledger location: `$DSH_HOME/state/dsh-teacher/ledger.db` (falls back to `.json`).
+- Question store: `$DSH_HOME/state/dsh-teacher/question-store.db` (falls back to
+  `.json`); the legacy v0.2 per-workspace JSON course files are imported once on
+  first load.
 
 ## License
 

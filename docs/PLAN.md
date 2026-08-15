@@ -406,3 +406,177 @@ half). It is declared via `dsh.client` in package.json
 - Wilson et al. (2019), *Nature Communications* — ~15% error rate is optimal difficulty. https://www.nature.com/articles/s41467-019-12552-4
 - FSRS (Free Spaced Repetition Scheduler) — https://github.com/open-spaced-repetition/fsrs4anki (algorithm used by Anki and drill-me).
 - Hypercorrection effect — confident errors are the most correctable; motivation for recording user confidence on every gap.
+
+---
+
+## 10. v0.3 redesign: SQLite question store + LLM-free quiz popup + post-quiz Socratic analysis
+
+> Design decision (2026-08-15): the plugin moves from an in-memory/JSON course to a
+> **built-in SQLite question store**. The LLM is used **only at parse time** (file →
+> DB records) and **after** a quiz (results → analysis + Socratic walk). The quiz
+> itself is **LLM-free**: questions come from the DB and are shown in a popup UI.
+
+### 10.1 Goals
+
+1. **Durable question bank.** Parsed questions persist as DB records per workspace,
+   surviving restarts, instead of a JSON course file.
+2. **LLM at the seams only.** The model extracts structured questions from a file at
+   import time; after a quiz it grades and walks the misses. During the quiz no LLM
+   call happens — a popup UI drives the whole test.
+3. **Quiz results flow back.** The popup posts answers to the plugin (stored as a
+   quiz run); the teacher then analyzes that run with the LLM and runs the Socratic
+   walk on the wrong questions.
+
+### 10.2 Data model — `lib/question-store.js`
+
+Mirrors `lib/ledger.js`: SQLite via `node:sqlite` (Node ≥ 22.5) with a JSON-file
+fallback. File: `$DSH_HOME/state/dsh-teacher/question-store.db` (override:
+`DSH_TEACHER_STORE`), JSON fallback at `question-store.json`.
+
+```sql
+CREATE TABLE IF NOT EXISTS courses (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace  TEXT NOT NULL,            -- session cwd (ledger convention)
+  title      TEXT NOT NULL,
+  source     TEXT,                     -- file path or 'llm-import'
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS questions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_id  INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  qid        TEXT NOT NULL,            -- logical id within the course (q1, …)
+  position   INTEGER NOT NULL,
+  prompt     TEXT NOT NULL,
+  answer_key TEXT,                     -- kept server-side; never on the wire
+  options    TEXT,                     -- JSON array | NULL
+  hints      TEXT,                     -- JSON array | NULL
+  section    TEXT,
+  passage    TEXT,
+  UNIQUE (course_id, qid)
+);
+
+CREATE TABLE IF NOT EXISTS quiz_runs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_id  INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  workspace  TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  answers    TEXT NOT NULL,            -- JSON: [{ qid, answer, confidence? }]
+  status     TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'analyzed'
+  analysis   TEXT                      -- JSON set by the LLM analysis tool
+);
+```
+
+Store API:
+
+- `upsertCourse({ workspace, title, source, questions })` → replaces the
+  workspace's latest course + question rows atomically.
+- `latestCourse(workspace)` → `{ courseId, title, source, questions[] }`
+  (questions carry answer keys internally) or `null`.
+- `publicCourse(workspace)` → same shape **without** `answer_key` (safe for
+  session events / projections / wire).
+- `createQuizRun({ workspace, courseId, answers })` → `{ runId }`.
+- `getQuizRun(runId)` → `{ courseId, workspace, answers, questions[] }` (with keys).
+- `markQuizRunAnalyzed(runId, analysis)`.
+
+**Migration from v0.2:** on first `latestCourse()` miss, if the legacy
+`course-<workspace>.json` file exists it is upserted once and the JSON kept as a
+read-only fallback.
+
+### 10.3 LLM-based parsing → DB records
+
+No new model plumbing is needed: the model already reads the dropped/pointed file
+and either (a) the tolerant parser handles it directly (`/teach <path>`) or (b) the
+model converts it and calls `import_curriculum`. Both paths now **persist into
+SQLite**:
+
+- `controller.loadCourse(agent, path)` → parse → `store.upsertCourse` → session
+  course → append `teacher/course` event.
+- `import_curriculum` → re-parse the model-emitted markdown → `store.upsertCourse`
+  (source `'llm-import'`) → session course → `teacher/course` event.
+- `courseOf()` fallback order: session memory → `store.latestCourse(workspace)` →
+  legacy JSON import → null.
+
+New session event **`teacher/course`**: `{ title, source, questions: publicQuestions(course) }`
+(never answer keys). This is what the quiz popup reads, so it works **without the
+model** and survives restart (the log is persisted).
+
+### 10.4 LLM-free quiz popup (client)
+
+New session projection **`teacherQuiz`** (same pattern as `teacherGaps`), folding:
+
+- `teacher/course` → `course` (public questions),
+- `teacher/quiz` → `quizActive`,
+- `teacher/quiz-run` → `lastRun` (runId, status).
+
+Client (`lib/client.js`, hand-rolled React, no build step):
+
+- **Header action** `📝 Quiz` next to the gaps button; enabled when the projection
+  has a course. Opens the quiz panel; the panel auto-opens when `quizActive` flips
+  true (`/quiz` command).
+- **Quiz panel** (`shell.overlay`):
+  - one question per screen: section/passage, prompt, **MCQ option buttons** when
+    `options` exist, else a **free-text input** (the fallback);
+  - selection highlight, Next/Prev, progress `3 / 10`, Finish;
+  - Finish → `POST /dsh-teacher/quiz/submit` with `{ answers: [{ qid, answer }] }`
+    → host stores the run and appends `teacher/quiz-run` → the panel then calls
+    `ctx.conversation.send('Quiz finished — analyze my results')` so the LLM
+    analysis starts automatically.
+- **No LLM anywhere in the quiz path**: questions come from the projection, answers
+  go to the host over HTTP.
+
+### 10.5 Post-quiz LLM analysis + Socratic walk
+
+Host side:
+
+- `POST /dsh-teacher/quiz/submit` (webServer route, aionui-panel pattern; lazy
+  `ctx.get('webServer')` so headless profiles still work): validates the JSON,
+  `createQuizRun`, appends `teacher/quiz-run`, returns `{ runId, accepted: true }`.
+  The route never serves answer keys (answers in, run id out).
+- New model tool **`analyze_quiz(runId)`**: returns the run's questions
+  (id, prompt, options, **answer_key** — the model is the trusted teacher; keys are
+  never rendered to the user), the user's answers, and per-question hints. The model
+  grades each answer (correct/partial/wrong/no-answer), records gaps via
+  `note_gap`, updates FSRS via `grade_answer`, and walks the misses Socratic-style.
+- Policy section (`buildPolicy`) gains a clause: when `teacherQuiz.lastRun.status
+  === 'pending'`, the teacher analyzes it on the next turn (call `analyze_quiz`,
+  grade, walk the misses). Combined with the popup's auto-send, the flow is: finish
+  popup → model analyzes → Socratic walk, with the quiz itself LLM-free.
+
+`teacher/quiz-run` is added to `KNOWN_SESSION_EVENT_TYPES` (index.js + register-events.js).
+
+### 10.6 Component changes
+
+| File | Change |
+|---|---|
+| `lib/question-store.js` | **new** — SQLite + JSON fallback store (courses/questions/quiz_runs). |
+| `lib/quiz-projection.js` | **new** — `teacherQuiz` projection (course/quiz/quiz-run fold). |
+| `index.js` | persist via question-store; `teacher/course` event; quiz-run append; `analyze_quiz` tool; `POST /dsh-teacher/quiz/submit` route; policy clause; register `teacher/quiz-run` event type. |
+| `lib/register-events.js` | add `teacher/quiz-run` (and `teacher/course`, `teacher/quiz`) to the catalog. |
+| `lib/course-store.js` | kept as legacy import fallback (v0.2 JSON). |
+| `lib/client.js` | quiz button + quiz panel (MCQ/free-text, submit, auto-send). |
+| `docs/README.md` | document the new flow (`/quiz` → popup → analysis). |
+| `test/*` | new `question-store.test.js`, `quiz-projection.test.js`; update persistence tests for the DB; smoke tests updated for the new tool + event types. |
+
+### 10.7 Security notes
+
+- `teacherQuiz` projection and `teacher/course` events carry **no answer keys**.
+- `/dsh-teacher/*` routes accept answers only and return run ids; they must never
+  serve keys or analysis. Like `/aionui-panel/*`, they are plain webServer routes —
+  do not expose the web server to untrusted networks (standard DSH caveat).
+- SQLite stores keys locally under `$DSH_HOME` (mode 0600 via the existing dir
+  permissions) — same trust as the gap ledger.
+
+### 10.8 Test plan
+
+1. `question-store.test.js` — upsert/latest/public course, quiz-run lifecycle,
+   JSON fallback, key-separation (public omits `answer_key`).
+2. `quiz-projection.test.js` — fold `teacher/course` + `teacher/quiz` +
+   `teacher/quiz-run`; same-reference no-op contract.
+3. `persistence.test.js` — course survives restart through the DB; legacy JSON
+   import path.
+4. `host-smoke.test.js` — tool catalog now includes `analyze_quiz`; event catalog
+   accepts `teacher/quiz-run`.
+5. Manual e2e on the mini: `/teach questions.md` → `/quiz` → popup answers → auto
+   analysis → Socratic walk of misses.

@@ -38,7 +38,7 @@ function installToolStub() {
   )
   writeFileSync(
     join(zodDir, 'index.js'),
-    'export const z = { object: (s) => ({ _shape: s }), array: (x) => x, any: () => "any" }\n',
+    'export const z = { object: (s) => ({ _shape: s }), array: (x) => x, any: () => "any", boolean: () => "boolean" }\n',
   )
   // @deepseek-ai/dsh-session stub — index.js and lib/register-events.js
   // register their session event types into the shared catalog Set.
@@ -67,10 +67,18 @@ function mockSession(cwd = '/tmp') {
   return session
 }
 
-function mockCtx() {
-  const registrations = { sections: [], commands: [], tools: [], events: {}, projections: [] }
+function mockCtx(opts = {}) {
+  const registrations = { sections: [], commands: [], tools: [], events: {}, projections: [], webRoutes: [] }
+  const webServer = opts.webServer === true
+    ? {
+        register: (route) => {
+          registrations.webRoutes.push(route)
+          return () => {}
+        },
+      }
+    : undefined
   const ctx = {
-    get: () => undefined,
+    get: (key) => (key === 'webServer' ? webServer : undefined),
     on(name, fn) {
       ;(registrations.events[name] ??= []).push(fn)
     },
@@ -122,12 +130,14 @@ test('host plugin registers section, commands, tools, and the gap projection', a
   )
   assert.deepEqual(
     registrations.tools.map((t) => t.name).sort(),
-    ['grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'quiz', 'retest', 'summary'],
+    ['analyze_quiz', 'grade_answer', 'import_curriculum', 'next_question', 'note_gap', 'quiz', 'retest', 'summary'],
   )
   assert.ok(registrations.events['agent/pre-step'])
-  assert.equal(registrations.projections.length, 1)
-  assert.equal(registrations.projections[0].key, 'teacherGaps')
-  assert.equal(registrations.projections[0].stateVersion, 1)
+  assert.deepEqual(
+    registrations.projections.map((p) => p.key).sort(),
+    ['teacherGaps', 'teacherQuiz'],
+  )
+  assert.ok(registrations.projections.every((p) => p.stateVersion === 1))
 
   // Regression guard: the dsh-tools value-schema DSL rejects a root-level
   // "required: [...]" array at mount (requiredness must be per-property).
@@ -163,11 +173,12 @@ test('teacher:policy section is empty until mode is active, then renders policy'
   assert.ok(text.includes('调用 summary 工具'))
   assert.ok(!text.includes('快速测试模式'))
 
-  // quiz mode appends the quick-test block
+  // quiz mode appends the popup/analysis block
   agent.session.append('teacher/quiz', { active: true })
   const quizText = section.text({ agent })
   assert.ok(quizText.includes('快速测试模式'))
-  assert.ok(quizText.includes('quiz（done: true）'))
+  assert.ok(quizText.includes('analyze_quiz'))
+  assert.ok(quizText.includes('📝'))
 })
 
 test('/teach <path> loads the sample course and enters teacher mode', async () => {
@@ -249,7 +260,7 @@ test('import_curriculum rejects a conversion with no questions', async () => {
 test('event types are registered with the harness persistence catalog', async () => {
   const { KNOWN_SESSION_EVENT_TYPES } = await import('@deepseek-ai/dsh-session')
   // index.js registers at module load
-  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz']) {
+  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz', 'teacher/course', 'teacher/quiz-run']) {
     assert.ok(KNOWN_SESSION_EVENT_TYPES.has(type), `expected ${type} registered`)
   }
   // the profile-boot registrar (dsh-teacher/register-events) registers too
@@ -257,6 +268,8 @@ test('event types are registered with the harness persistence catalog', async ()
   assert.equal(registrar.name, 'dsh-teacher/register-events')
   registrar.apply()
   assert.ok(KNOWN_SESSION_EVENT_TYPES.has('teacher/mode'))
+  assert.ok(KNOWN_SESSION_EVENT_TYPES.has('teacher/course'))
+  assert.ok(KNOWN_SESSION_EVENT_TYPES.has('teacher/quiz-run'))
 })
 
 test('quiz: start returns the whole bank and flips quiz mode; done returns wrong questions', async () => {
@@ -339,4 +352,111 @@ test('next_question output is lossless JSON (options omitted when absent)', asyn
   // `options: undefined` key would be dropped and fail dsh validation.
   assert.deepEqual(JSON.parse(JSON.stringify(result)), result)
   assert.equal('options' in result, false)
+})
+
+test('/teach persists the course and logs public questions (no answer keys)', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx()
+  await apply(ctx)
+  const teach = registrations.commands.find((c) => c.name === 'teach')
+
+  const agent = { session: mockSession('/persist-teach') }
+  const sample = join(REPO_ROOT, 'docs', 'questions.example.md')
+  const result = await teach.handler({ agent, rawInput: sample })
+  assert.equal(result.kind, 'success')
+
+  const courseEvent = agent.session.events.find((e) => e.type === 'teacher/course')
+  assert.ok(courseEvent, 'teacher/course event appended')
+  assert.ok(courseEvent.data.courseId != null, 'courseId present for the popup submit')
+  assert.equal(courseEvent.data.title, 'Networking review')
+  assert.equal(courseEvent.data.questions.length, 3)
+  for (const q of courseEvent.data.questions) {
+    assert.equal('answer' in q, false, 'public question must not carry the answer key')
+    assert.equal('answerKey' in q, false)
+  }
+})
+
+test('quiz submit route stores a run; analyze_quiz grades it and marks it analyzed', async () => {
+  const { apply } = await import('../index.js')
+  const { ctx, registrations } = mockCtx({ webServer: true })
+  await apply(ctx)
+  const imp = registrations.tools.find((t) => t.name === 'import_curriculum')
+  const analyze = registrations.tools.find((t) => t.name === 'analyze_quiz')
+  const route = registrations.webRoutes.find((r) => r.path === '/dsh-teacher/quiz/submit')
+  assert.ok(route, 'quiz submit route registered on webServer')
+
+  const agent = { session: mockSession('/quiz-route-workspace') }
+  await imp.execute({
+    courseTitle: 'Deck',
+    markdown: '## Q1: A?\n<!-- answer: a -->\n## Q2: Choose.\n<!-- options: A. x | B. y -->\n<!-- answer: B -->\n',
+  }, { agent })
+
+  const courseEvent = agent.session.events.find((e) => e.type === 'teacher/course')
+  const courseId = courseEvent.data.courseId
+
+  // Simulate the LLM-free popup POST.
+  const req = {
+    [Symbol.asyncIterator]: async function* () {
+      yield JSON.stringify({
+        courseId,
+        answers: [{ qid: 'q1', answer: 'tcp' }, { qid: 'q2', answer: 'cat' }],
+      })
+    },
+  }
+  let resStatus = 0
+  let resBody = ''
+  const res = {
+    writeHead: (status) => { resStatus = status },
+    end: (body) => { resBody = body },
+  }
+  await route.handler(req, res)
+  assert.equal(resStatus, 200)
+  const submitted = JSON.parse(resBody)
+  assert.equal(submitted.ok, true)
+  assert.ok(submitted.runId != null)
+
+  // The route rejects malformed payloads.
+  const badReq = {
+    [Symbol.asyncIterator]: async function* () { yield '{}' },
+  }
+  let badStatus = 0
+  await route.handler(badReq, { writeHead: (s) => { badStatus = s }, end: () => {} })
+  assert.equal(badStatus, 400)
+
+  // analyze_quiz returns the run with answer keys (trusted teacher) + answers.
+  const run = await analyze.execute({ runId: submitted.runId }, { agent })
+  assert.equal(run.status, 'pending')
+  assert.equal(run.questionCount, 2)
+  assert.equal(run.answers[0].answer, 'tcp')
+  assert.equal(run.questions[0].answerKey, 'a')
+  assert.equal(run.questions[1].options.length, 2)
+  assert.equal(run.courseTitle, 'Deck')
+
+  // done marks the run analyzed and appends teacher/quiz-run.
+  const done = await analyze.execute({ runId: submitted.runId, done: true }, { agent })
+  assert.equal(done.status, 'analyzed')
+  const runEvent = agent.session.events.filter((e) => e.type === 'teacher/quiz-run').at(-1)
+  assert.deepEqual(runEvent.data, { runId: submitted.runId, status: 'analyzed' })
+})
+
+test('a course persisted to the SQLite store is restored by a fresh controller', async () => {
+  const first = mockCtx()
+  await (await import('../index.js')).apply(first.ctx)
+  const teach = first.registrations.commands.find((c) => c.name === 'teach')
+  const agent = { session: mockSession('/restore-workspace') }
+  const sample = join(REPO_ROOT, 'docs', 'questions.example.md')
+  await teach.handler({ agent, rawInput: sample })
+  // let the eager store open + upsert settle
+  await new Promise((resolve) => setTimeout(resolve, 80))
+
+  const second = mockCtx()
+  await (await import('../index.js')).apply(second.ctx)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  const nq = second.registrations.tools.find((t) => t.name === 'next_question')
+  const agent2 = { session: mockSession('/restore-workspace') }
+  // A real restarted session folds teacher/mode back from its persisted log.
+  agent2.session.append('teacher/mode', { active: true, course: 'Networking review' })
+  const result = await nq.execute({ index: 0 }, { agent: agent2 })
+  assert.ok(result.prompt.length > 0)
+  assert.equal(result.total, 3)
 })
