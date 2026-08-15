@@ -113,6 +113,20 @@ test('host plugin registers section, commands, tools, and the gap projection', a
   assert.equal(registrations.projections.length, 1)
   assert.equal(registrations.projections[0].key, 'teacherGaps')
   assert.equal(registrations.projections[0].stateVersion, 1)
+
+  // Regression guard: the dsh-tools value-schema DSL rejects a root-level
+  // "required: [...]" array at mount (requiredness must be per-property).
+  // This exact bug broke the teacher preset twice; keep it pinned.
+  for (const tool of registrations.tools) {
+    assert.ok(
+      !Object.hasOwn(tool.output.schema, 'required'),
+      `tool "${tool.name}" output.schema must not declare a root-level "required" array`,
+    )
+    assert.ok(
+      !Object.hasOwn(tool.parameters, 'required'),
+      `tool "${tool.name}" parameters must not declare a root-level "required" array`,
+    )
+  }
 })
 
 test('teacher:policy section is empty until mode is active, then renders policy', async () => {

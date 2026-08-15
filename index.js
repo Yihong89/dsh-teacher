@@ -868,7 +868,8 @@ export async function apply(ctx) {
             },
           },
         },
-        required: ['mode'],
+        // DSL note: requiredness is per-property ("required: true"), never a
+        // root-level "required: [...]" array — the DSL rejects that at mount.
       },
       render: (_args, result) => [
         { type: 'text', text: result.mode === 'quiz'
@@ -940,7 +941,8 @@ export async function apply(ctx) {
             required: true,
           },
         },
-        required: ['course', 'total', 'open', 'mastered', 'gaps'],
+        // DSL note: requiredness is per-property ("required: true"), never a
+        // root-level "required: [...]" array — the DSL rejects that at mount.
       },
       render: (_args, result) => [
         { type: 'text', text: `Summary: ${result.open} open gaps, ${result.mastered} mastered (of ${result.total}).` },
