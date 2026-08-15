@@ -28,7 +28,7 @@ import { buildPolicy } from './lib/policy.js'
 import { LedgerStore, gapId, GAP_STATUS } from './lib/ledger.js'
 import { QuestionStore, questionStoreFilePath, publicQuestion } from './lib/question-store.js'
 import { quizProjectionWith } from './lib/quiz-projection.js'
-import { foldTeacherState, hasOpenTurn, MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT } from './lib/fold.js'
+import { foldTeacherState, hasOpenTurn, MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT, SPEAK_EVENT } from './lib/fold.js'
 import { gapProjectionWith } from './lib/gap-projection.js'
 import {
   buildGap, gapKindForVerdict, isCorrect, ratingForVerdict, verdictLabel,
@@ -45,7 +45,7 @@ import { FSRS, createCard, review } from './lib/fsrs.js'
  * first read of a process, the profile-boot registrar (`dsh-teacher/
  * register-events`) runs first (see lib/register-events.js).
  */
-for (const type of [MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT]) {
+for (const type of [MODE_EVENT, GAP_EVENT, GRADE_EVENT, QUIZ_EVENT, COURSE_EVENT, QUIZ_RUN_EVENT, SPEAK_EVENT]) {
   KNOWN_SESSION_EVENT_TYPES.add(type)
 }
 
@@ -53,6 +53,8 @@ export const name = 'dsh-teacher'
 
 /** Required host services: tool registry and system-prompt assembly. */
 export const inject = ['tools', 'systemPrompt']
+
+
 
 const DEFAULT_FIRST_INTERVAL_DAYS = 1
 
@@ -364,6 +366,17 @@ class TeacherController {
     }
   }
 
+  /** Toggle TTS auto-speak (log-only `teacher/speak` event). */
+  setSpeak(agent, enabled) {
+    try {
+      agent.session.append(SPEAK_EVENT, { enabled })
+      return 'committed'
+    } catch (error) {
+      this.ctx.logger?.warn?.(`dsh-teacher: failed to append teacher/speak: ${error}`)
+      return 'queued'
+    }
+  }
+
   /** Wrong questions so far in this course, from the durable gap ledger. */
   async wrongQuestions(agent) {
     const state = this.stateOf(agent)
@@ -655,6 +668,7 @@ export async function apply(ctx) {
           course: z.any(),
           quizActive: z.boolean(),
           lastRun: z.any(),
+          speakEnabled: z.boolean(),
         }),
       ),
     )
@@ -805,6 +819,7 @@ export async function apply(ctx) {
         course: course ?? { title: folded.course, questions: [] },
         quiz: folded.quiz,
         quizRun: folded.lastRun,
+        speak: folded.speakEnabled,
       })
     },
   })
@@ -1008,6 +1023,35 @@ export async function apply(ctx) {
           kind: 'success',
           text: `Quiz mode on — the quiz panel is now open: answer all ${course.questions.length} questions there (no AI involved). When you finish, the teacher will analyze your results and walk you through the misses.`,
         }
+      },
+    })
+
+    commandCtx.commands.register({
+      name: 'speak',
+      description: 'Toggle TTS auto-speak, or speak text aloud right now',
+      input: { hint: '[on|off|<text>]' },
+      handler: async ({ agent, rawInput }) => {
+        const action = rawInput.trim()
+        if (action === 'on' || action === 'off') {
+          const outcome = controller.setSpeak(agent, action === 'on')
+          const enabled = action === 'on'
+          return {
+            kind: 'success',
+            text: outcome === 'committed'
+              ? `TTS ${enabled ? 'on' : 'off'}.`
+              : `Turning TTS ${enabled ? 'on' : 'off'} (applies from the next step).`,
+          }
+        }
+        if (action === '') {
+          const folded = foldTeacherState(agent.session.events)
+          return {
+            kind: 'success',
+            text: folded.speakEnabled
+              ? 'TTS auto-speak is on. /speak off to mute.'
+              : 'TTS auto-speak is off. /speak on to enable.',
+          }
+        }
+        return { kind: 'error', text: 'Usage: /speak on | off' }
       },
     })
 
@@ -1569,6 +1613,7 @@ export async function apply(ctx) {
       }
     },
   }))
+
 }
 
 export { TeacherController }

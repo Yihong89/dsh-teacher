@@ -72,12 +72,15 @@ test('apply registers five toolviews, a header button, and an overlay panel', ()
   assert.equal(quizOpts.id, 'dsh-teacher-quiz')
   assert.equal(typeof quizOpts.label, 'function')
 
-  const gapsBtn = entries.find((e) => e.slot === 'conversation.input.right')
+  const gapsBtn = entries.find((e) => e.slot === 'conversation.input.right' && e.register().opts.id === 'dsh-teacher-gaps')
   assert.ok(gapsBtn)
   const gapsOpts = gapsBtn.register().opts
   assert.equal(gapsOpts.name, 'conversation.input.right')
   assert.equal(gapsOpts.id, 'dsh-teacher-gaps')
   assert.equal(typeof gapsOpts.label, 'function')
+
+  const speakBtn = entries.find((e) => e.slot === 'conversation.input.right' && e.register().opts.id === 'dsh-teacher-speak')
+  assert.ok(speakBtn, 'TTS speak toggle registered in the chat box')
 
   const overlay = entries.find((e) => e.slot === 'shell.overlay')
   assert.ok(overlay)
@@ -114,7 +117,7 @@ test('gaps button shows a due badge from the teacherGaps projection', () => {
   const { slots, entries } = mockSlots()
   moduleObj.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
 
-  const button = entries.find((e) => e.slot === 'conversation.input.right')
+  const button = entries.find((e) => e.slot === 'conversation.input.right' && e.register().opts.id === 'dsh-teacher-gaps')
   const { component: GapsButton } = button.register()
   const now = Date.now()
   const tree = GapsButton({

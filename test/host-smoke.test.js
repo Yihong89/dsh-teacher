@@ -38,7 +38,7 @@ function installToolStub() {
   )
   writeFileSync(
     join(zodDir, 'index.js'),
-    'export const z = { object: (s) => ({ _shape: s }), array: (x) => x, any: () => "any", boolean: () => "boolean" }\n',
+    'export const z = { object: (s) => ({ _shape: s }), array: (x) => x, any: () => "any", boolean: () => "boolean", string: () => "string" }\n',
   )
   // @deepseek-ai/dsh-session stub — index.js and lib/register-events.js
   // register their session event types into the shared catalog Set.
@@ -126,7 +126,7 @@ test('host plugin registers section, commands, tools, and the gap projection', a
 
   assert.deepEqual(
     registrations.commands.map((c) => c.name).sort(),
-    ['course', 'gaps', 'quiz', 'retest', 'summary', 'teach'],
+    ['course', 'gaps', 'quiz', 'retest', 'speak', 'summary', 'teach'],
   )
   assert.deepEqual(
     registrations.tools.map((t) => t.name).sort(),
@@ -179,6 +179,8 @@ test('teacher:policy section is empty until mode is active, then renders policy'
   assert.ok(quizText.includes('快速测试模式'))
   assert.ok(quizText.includes('analyze_quiz'))
   assert.ok(quizText.includes('📝'))
+  // TTS rule renders by default
+  assert.ok(text.includes('TTS 朗读工具'))
 })
 
 test('/teach <path> loads the sample course and enters teacher mode', async () => {
@@ -260,7 +262,7 @@ test('import_curriculum rejects a conversion with no questions', async () => {
 test('event types are registered with the harness persistence catalog', async () => {
   const { KNOWN_SESSION_EVENT_TYPES } = await import('@deepseek-ai/dsh-session')
   // index.js registers at module load
-  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz', 'teacher/course', 'teacher/quiz-run']) {
+  for (const type of ['teacher/mode', 'teacher/gap', 'teacher/grade', 'teacher/quiz', 'teacher/course', 'teacher/quiz-run', 'teacher/speak']) {
     assert.ok(KNOWN_SESSION_EVENT_TYPES.has(type), `expected ${type} registered`)
   }
   // the profile-boot registrar (dsh-teacher/register-events) registers too

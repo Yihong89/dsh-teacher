@@ -12,7 +12,7 @@ import {
 
 test('teacherQuiz folds course, quiz mode, and run status', () => {
   let state = initQuizProjection()
-  assert.deepEqual(state, { course: null, quizActive: false, lastRun: null })
+  assert.deepEqual(state, { course: null, quizActive: false, lastRun: null, speakEnabled: true })
 
   state = applyQuizProjection(state, {
     type: 'teacher/course',
